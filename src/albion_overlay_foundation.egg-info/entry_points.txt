@@ -1,0 +1,2 @@
+[console_scripts]
+albion-bot = albion_bot.app:main

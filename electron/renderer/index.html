@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Albion Bot V2</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-icon">S</div>
+          <div>
+            <p class="brand-title">Smugden Inspired</p>
+            <p class="brand-subtitle">Albion Bot V2</p>
+          </div>
+        </div>
+        <nav class="nav">
+          <button class="nav-btn is-active" data-page="dashboard">Dashboard</button>
+          <button class="nav-btn" data-page="items">Items</button>
+          <button class="nav-btn" data-page="check">Check</button>
+          <button class="nav-btn" data-page="buy">Buy</button>
+          <button class="nav-btn" data-page="auction">Auction Helper</button>
+          <button class="nav-btn" data-page="settings">Settings</button>
+        </nav>
+      </aside>
+
+      <section class="main-shell">
+        <header class="topbar">
+          <div>
+            <h1 id="page-title">Dashboard</h1>
+            <p id="top-status-line">Runtime status: Idle</p>
+          </div>
+          <div class="top-actions">
+            <button id="btn-refresh-state">Refresh</button>
+            <button id="btn-open-log">Open CSV Log</button>
+          </div>
+        </header>
+
+        <main class="page-container">
+          <section class="page is-visible" data-page="dashboard">
+            <section class="stat-grid">
+              <article class="stat-card">
+                <p class="label">Backend</p>
+                <p id="backend-status" class="value">Connecting...</p>
+              </article>
+              <article class="stat-card">
+                <p class="label">Runtime</p>
+                <p id="runtime-status" class="value">Idle</p>
+              </article>
+              <article class="stat-card">
+                <p class="label">Last Value</p>
+                <p id="last-value" class="value">--</p>
+              </article>
+              <article class="stat-card">
+                <p class="label">Top Score</p>
+                <p id="metric-top-score" class="value">0</p>
+              </article>
+              <article class="stat-card">
+                <p class="label">Scan Batches</p>
+                <p id="metric-scan-batches" class="value">0</p>
+              </article>
+              <article class="stat-card">
+                <p class="label">Success Rate</p>
+                <p id="metric-success-rate" class="value">0%</p>
+              </article>
+              <article class="stat-card">
+                <p class="label">Average Score</p>
+                <p id="metric-avg-score" class="value">0</p>
+              </article>
+              <article class="stat-card">
+                <p class="label">Active Query</p>
+                <p id="active-query" class="value">scholar robe 5.1</p>
+              </article>
+            </section>
+
+            <section class="panel-grid two">
+              <article class="card">
+                <h2>Quick Actions</h2>
+                <div class="row">
+                  <button id="btn-run-watch-scan">Run Watchlist Scan Once</button>
+                  <button id="btn-start-watch-loop">Start Watchlist Loop</button>
+                  <button id="btn-stop-watch-loop">Stop Watchlist Loop</button>
+                </div>
+                <div class="row">
+                  <label>Batch Interval (sec)</label>
+                  <input id="input-watch-interval" type="number" step="0.1" min="0.2" value="2.0" />
+                </div>
+                <div class="row">
+                  <label>Item Spacing (sec)</label>
+                  <input id="input-item-spacing" type="number" step="0.05" min="0.0" value="0.25" />
+                </div>
+              </article>
+              <article class="card">
+                <h2>Runtime Log</h2>
+                <div id="log-panel" class="log-panel"></div>
+              </article>
+            </section>
+
+            <section class="card">
+              <h2>Top Opportunities</h2>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Timestamp</th>
+                    <th>Query</th>
+                    <th>Observed</th>
+                    <th>Target</th>
+                    <th>Delta %</th>
+                    <th>Score</th>
+                    <th>Label</th>
+                  </tr>
+                </thead>
+                <tbody id="opportunities-body"></tbody>
+              </table>
+            </section>
+          </section>
+
+          <section class="page" data-page="items">
+            <section class="items-layout">
+              <article class="card catalog-pane">
+                <h2>Items (A–Z)</h2>
+                <p class="hint-line catalog-source">
+                  Data:
+                  <a
+                    href="https://github.com/ao-data/ao-bin-dumps/blob/master/formatted/items.json"
+                    target="_blank"
+                    rel="noreferrer"
+                    >ao-bin-dumps items.json</a>
+                  — tier (<code>T5_…</code>) and enchant (<code>@1</code>=.1) come from each item ID. Item
+                  <strong>quality</strong> (Normal–Masterpiece) is not in this file; you choose that in the market
+                  after search.
+                </p>
+                <div class="row catalog-toolbar">
+                  <label>Search</label>
+                  <input id="input-catalog-filter" placeholder="Filter by item name..." autocomplete="off" />
+                  <button type="button" id="btn-catalog-clear">Clear</button>
+                  <button type="button" id="btn-catalog-refresh">Refresh list</button>
+                </div>
+                <p id="catalog-status" class="catalog-status">Loading catalog…</p>
+                <div id="catalog-accordion" class="catalog-accordion"></div>
+              </article>
+              <article class="card items-manage-pane">
+                <h2>Watchlist entry</h2>
+                <div class="row">
+                  <label>Search</label>
+                  <input id="input-watch-filter" placeholder="Filter saved items…" />
+                </div>
+                <div class="row">
+                  <label>New query</label>
+                  <input id="input-watch-query" placeholder="e.g. Expert's Scholar Robe" />
+                </div>
+                <div class="row split">
+                  <label>Target / Min %</label>
+                  <input id="input-watch-target" type="number" placeholder="target price" />
+                  <input id="input-watch-profit" type="number" step="0.1" min="0" placeholder="min profit %" value="5" />
+                  <button id="btn-watch-add">Add item</button>
+                </div>
+              </article>
+              <article class="card items-table-pane">
+                <h2>Selected items</h2>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Enabled</th>
+                      <th>Query</th>
+                      <th>Target</th>
+                      <th>Min %</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody id="watchlist-body"></tbody>
+                </table>
+              </article>
+            </section>
+          </section>
+
+          <section class="page" data-page="check">
+            <section class="panel-grid two">
+              <article class="card">
+                <h2>Scan Controls</h2>
+                <div class="row">
+                  <button id="btn-run-once">Run Query Once</button>
+                  <button id="btn-start-loop">Start Loop</button>
+                  <button id="btn-stop-loop">Stop Loop</button>
+                </div>
+                <div class="row">
+                  <label>Query</label>
+                  <input id="input-query" value="scholar robe 5.1" />
+                </div>
+                <div class="row">
+                  <label>Interval (sec)</label>
+                  <input id="input-interval" type="number" step="0.1" min="0.2" value="1.0" />
+                </div>
+                <div class="row">
+                  <button id="btn-export-reco">Open Recommendations CSV</button>
+                </div>
+              </article>
+              <article class="card">
+                <h2>Calibration</h2>
+                <p class="hint-line">Shortcuts: <code>Ctrl+Shift+S</code> search point, <code>Ctrl+Shift+R</code> price region, <code>Ctrl+Shift+Q</code> run once, <code>Ctrl+Shift+W</code> scan watchlist, <code>Ctrl+Shift+L</code> start loop, <code>Ctrl+Shift+X</code> stop loop, <code>Ctrl+Shift+H</code> refresh.</p>
+                <div class="row">
+                  <button id="btn-capture-search-point">Capture Search Point From Cursor</button>
+                </div>
+                <div class="row split">
+                  <label>Search Point</label>
+                  <input id="input-search-x" type="number" placeholder="x" />
+                  <input id="input-search-y" type="number" placeholder="y" />
+                  <button id="btn-apply-search-point">Apply</button>
+                </div>
+                <div class="row">
+                  <button id="btn-select-region">Draw OCR Region</button>
+                </div>
+                <div class="row split">
+                  <label>Region</label>
+                  <input id="input-region-left" type="number" placeholder="left" />
+                  <input id="input-region-top" type="number" placeholder="top" />
+                  <input id="input-region-width" type="number" placeholder="width" />
+                  <input id="input-region-height" type="number" placeholder="height" />
+                  <button id="btn-apply-region">Apply</button>
+                </div>
+              </article>
+            </section>
+
+            <section class="panel-grid two">
+              <article class="card">
+                <h2>Humanization</h2>
+                <div class="row">
+                  <label>Settle Delay (sec)</label>
+                  <input id="input-settle" type="number" step="0.01" min="0.0" value="0.35" />
+                </div>
+                <div class="row">
+                  <label>Post Search Delay (sec)</label>
+                  <input id="input-post" type="number" step="0.01" min="0.0" value="0.6" />
+                </div>
+                <div class="row">
+                  <label>Jitter Ratio</label>
+                  <input id="input-jitter" type="number" step="0.01" min="0.0" max="0.5" value="0.1" />
+                </div>
+                <div class="row">
+                  <label>Key Delay Base (ms)</label>
+                  <input id="input-key-delay-ms" type="number" step="1" min="0" max="100" value="12" />
+                </div>
+                <div class="row">
+                  <button id="btn-apply-humanization">Apply Humanization</button>
+                </div>
+              </article>
+              <article class="card">
+                <h2>Diagnostics</h2>
+                <pre id="diagnostics" class="diagnostics">Waiting for backend health check...</pre>
+              </article>
+            </section>
+
+            <section class="card">
+              <h2>Recent Fetches</h2>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Timestamp</th>
+                    <th>Query</th>
+                    <th>Value</th>
+                    <th>Raw OCR Text</th>
+                  </tr>
+                </thead>
+                <tbody id="results-body"></tbody>
+              </table>
+            </section>
+          </section>
+
+          <section class="page placeholder-page" data-page="buy">
+            <h2>Buy</h2>
+            <p>Phase V3 placeholder page.</p>
+          </section>
+
+          <section class="page placeholder-page" data-page="auction">
+            <h2>Auction Helper</h2>
+            <p>Phase V3 placeholder page.</p>
+          </section>
+
+          <section class="page placeholder-page" data-page="settings">
+            <h2>Settings</h2>
+            <p>Phase V3 placeholder page.</p>
+          </section>
+        </main>
+      </section>
+    </div>
+
+    <script src="./renderer.js"></script>
+  </body>
+</html>

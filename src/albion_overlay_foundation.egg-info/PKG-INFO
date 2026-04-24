@@ -1,0 +1,90 @@
+Metadata-Version: 2.4
+Name: albion-overlay-foundation
+Version: 0.1.0
+Summary: Windows overlay + screen capture + OCR foundation for desktop automation.
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: PySide6>=6.7
+Requires-Dist: mss>=9.0.1
+Requires-Dist: Pillow>=10.3.0
+Requires-Dist: pytesseract>=0.3.10
+Requires-Dist: keyboard>=0.13.5
+Requires-Dist: pyperclip>=1.9.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.2.0; extra == "dev"
+
+# Albion Bot Foundation (Windows)
+
+Desktop foundation for:
+- Transparent overlay
+- Region-based screen capture
+- Numeric-focused OCR extraction
+- Timestamped CSV logging
+- Global hotkey control loop
+- Optional market search automation action
+
+## Features Implemented
+
+- Transparent, always-on-top click-through overlay
+- Calibration mode for manual region selection
+- Capture loop (start/stop) and single-capture trigger
+- OCR pipeline with numeric normalization (`1,200` -> `1200`)
+- Append-only CSV logging (`timestamp,value`)
+- One-shot market action: click search field, paste configured query, OCR the calibrated price region
+- Modular package structure for future automation extensions
+
+## Requirements
+
+- Windows 10/11
+- Python 3.11+
+- Tesseract OCR installed and available on PATH
+  - Download: [https://github.com/UB-Mannheim/tesseract/wiki](https://github.com/UB-Mannheim/tesseract/wiki)
+
+## Setup
+
+```powershell
+python -m venv .venv
+.venv\Scripts\activate
+python -m pip install --upgrade pip
+pip install -e .[dev]
+```
+
+## Run
+
+```powershell
+albion-bot
+```
+
+## Hotkeys (Default)
+
+- `F8` Start/Stop capture loop
+- `F9` Single capture
+- `F10` Calibrate capture region
+- `F11` Toggle overlay visibility
+- `F6` Calibrate search click point (click market search box)
+- `F7` Run one market query + price capture
+
+## Market Action Workflow
+
+1. Open market UI in game.
+2. Press `F6`, then click the search input box once.
+3. Press `F10`, drag-select the on-screen price region (the number you want OCR to read).
+4. Press `F7` to execute:
+   - click search input
+   - clear existing text
+   - paste query (`scholar robe 5.1`)
+   - press Enter
+   - capture configured price region
+   - OCR + normalize + log value
+
+## Output
+
+- CSV file: `capture_log.csv`
+- Temporary screenshot for OCR: `temp_capture.png`
+
+## Notes
+
+- If Tesseract is missing, overlay status reports OCR unavailable.
+- Adjust loop delay and paths in `src/albion_bot/config/settings.py`.
+- Adjust market query text (`market_search_text`) and hotkeys in `src/albion_bot/config/settings.py`.
+

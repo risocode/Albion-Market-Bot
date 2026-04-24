@@ -1,0 +1,2 @@
+"""Albion bot foundation package."""
+

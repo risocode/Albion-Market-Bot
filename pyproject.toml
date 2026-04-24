@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "albion-overlay-foundation"
+version = "0.1.0"
+description = "Windows overlay + screen capture + OCR foundation for desktop automation."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "PySide6>=6.7",
+  "mss>=9.0.1",
+  "Pillow>=10.3.0",
+  "pytesseract>=0.3.10",
+  "keyboard>=0.13.5",
+  "pyperclip>=1.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2.0",
+]
+
+[project.scripts]
+albion-bot = "albion_bot.app:main"
+albion-bot-service = "albion_bot.service_main:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

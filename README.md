@@ -1,0 +1,127 @@
+# Albion Bot Foundation (Windows)
+
+Desktop automation foundation for:
+- Transparent overlay
+- Region-based screen capture
+- Numeric-focused OCR extraction
+- Timestamped CSV logging
+- Humanized market search automation
+- Electron monitoring dashboard
+
+## Features Implemented
+
+- Transparent, always-on-top click-through overlay
+- Calibration mode for manual region selection
+- Capture loop (start/stop) and single-capture trigger
+- OCR pipeline with numeric normalization (`1,200` -> `1200`)
+- Append-only CSV logging (`timestamp,value`)
+- One-shot market action: click search field, paste configured query, OCR the calibrated price region
+- Modular package structure for future automation extensions
+
+## Requirements
+
+- Windows 10/11
+- Python 3.11+
+- Tesseract OCR installed and available on PATH
+  - Download: [https://github.com/UB-Mannheim/tesseract/wiki](https://github.com/UB-Mannheim/tesseract/wiki)
+
+## Setup (Python Backend)
+
+```powershell
+python -m venv .venv
+.venv\Scripts\activate
+python -m pip install --upgrade pip
+pip install -e .[dev]
+```
+
+## Setup (Electron UI)
+
+```powershell
+npm install
+```
+
+## Run Modes
+
+### Overlay + Hotkeys mode (legacy runtime)
+```powershell
+albion-bot
+```
+
+### Service mode only (used by Electron)
+```powershell
+albion-bot-service
+```
+
+### Electron dashboard (recommended)
+```powershell
+npm run electron:dev
+```
+
+### One-click launcher (normal app-style)
+- Double-click `Start Albion Bot Dashboard.vbs` (hidden console), or
+- Double-click `Start Albion Bot Dashboard.bat` (shows startup logs).
+- Launcher auto-closes old bot/electron processes, ensures dependencies, then opens dashboard.
+
+## Hotkeys (Default)
+
+- `F8` Start/Stop capture loop
+- `F9` Single capture
+- `F10` Calibrate capture region
+- `F11` Toggle overlay visibility
+- `F6` Calibrate search click point (click market search box)
+- `F7` Run one market query + price capture
+
+## Hotkeys (Backup for games)
+
+- `Ctrl+Alt+6` Calibrate search click point
+- `Ctrl+Alt+0` Calibrate OCR region (drag-draw rectangle)
+- `Ctrl+Alt+7` Run one market query + price capture
+- `Ctrl+Alt+8` Start/Stop capture loop
+- `Ctrl+Alt+9` Single capture
+- `Ctrl+Alt+H` Toggle overlay visibility
+
+## Fullscreen Mouse Fallback
+
+If Albion swallows keyboard hotkeys in exclusive fullscreen:
+
+- Mouse `XBUTTON1` (side button 1) calibrates search point (same as `F6`)
+- Mouse `XBUTTON2` (side button 2) calibrates OCR region (same as `F10`, drag-draw rectangle)
+
+## Market Action Workflow
+
+1. Open market UI in game.
+2. Hover mouse over search input and press `F6` once (stores click point).
+3. Press `F10`, then drag-draw a rectangle over the price area.
+4. Press `F7` to execute:
+   - click search input
+   - clear existing text
+   - paste query (`scholar robe 5.1`)
+   - press Enter
+   - capture configured price region
+   - OCR + normalize + log value
+
+## Electron Dashboard Workflow
+
+1. Start dashboard with `npm run electron:dev`.
+2. Click **Capture Search Point From Cursor** while your cursor is over market search input.
+3. Click **Draw OCR Region**, then drag-select the price area.
+4. Optional: tune humanization jitter and delays.
+5. Click **Run Query Once** or **Start Loop**.
+6. Watch live updates in:
+   - runtime status
+   - latest value
+   - recent fetch table
+   - runtime logs
+
+## Output
+
+- CSV file: `capture_log.csv`
+- Temporary screenshot for OCR: `temp_capture.png`
+
+## Notes
+
+- If Tesseract is missing, overlay status reports OCR unavailable.
+- Adjust loop delay and paths in `src/albion_bot/config/settings.py`.
+- Adjust market query text (`market_search_text`) and hotkeys in `src/albion_bot/config/settings.py`.
+- Electron runs Python backend service via stdio JSON IPC.
+
