@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import csv
 import json
+import re
+import shutil
 import threading
+import time
+from csv import DictReader, DictWriter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +16,7 @@ from PySide6.QtWidgets import QApplication
 
 from albion_bot.automation.market_query import MarketQueryAutomation
 from albion_bot.capture.cursor_position import get_cursor_position
+from albion_bot.capture.point_selector import PointSelector
 from albion_bot.capture.region_selector import RegionSelector
 from albion_bot.capture.screen_capture import ScreenCapture
 from albion_bot.config.settings import AppSettings
@@ -66,11 +72,18 @@ class BotService:
         self._scorer = OpportunityScorer()
         self._session = SessionStore(max_history=500)
         self._recommendation_exporter = RecommendationExporter(Path("recommendations_log.csv"))
+        self._market_prices_file = Path("market_prices_log.csv")
 
         self._watchlist_loop_thread: threading.Thread | None = None
         self._watchlist_loop_stop = threading.Event()
         self._watchlist_interval_seconds = settings.capture_interval_seconds
         self._watchlist_item_spacing_seconds = 0.25
+        self._category_item_spacing_seconds = 2.0
+        self._category_break_every_seconds = 60.0
+        self._category_break_duration_seconds = 5.0
+        self._category_scan_thread: threading.Thread | None = None
+        self._category_scan_stop = threading.Event()
+        self._category_scan_running = False
         self._calibration_file = Path("calibration_profile.json")
         self._load_calibration_profile()
 
@@ -149,6 +162,13 @@ class BotService:
 
     def capture_cursor(self) -> dict:
         point = get_cursor_position()
+        return self._point_to_dict(point)
+
+    def select_point(self) -> dict | None:
+        _ = self._ensure_qt_app()
+        point = PointSelector.select_point()
+        if point is None:
+            return None
         return self._point_to_dict(point)
 
     def select_region(self) -> dict | None:
@@ -347,6 +367,161 @@ class BotService:
     def export_recommendations_csv(self) -> dict:
         return {"path": str(Path("recommendations_log.csv").resolve())}
 
+    def run_category_scan(self, category_id: str, items: list[dict], city: str = "") -> dict:
+        if self._category_scan_running:
+            return {"running": True}
+
+        category = str(category_id).strip()
+        if not category:
+            raise ValueError("Category is required.")
+        market_city = str(city or "").strip()
+        if not market_city:
+            raise ValueError("City is required (choose where the market is open in-game).")
+        if not items:
+            raise ValueError("No items provided for category scan.")
+
+        normalized_items: list[dict] = []
+        for row in items:
+            item_name = str(row.get("name") or row.get("queryText") or "").strip()
+            item_id = str(row.get("id") or row.get("itemId") or "").strip()
+            if not item_name:
+                continue
+            normalized_items.append(
+                {
+                    "name": item_name,
+                    "base_name": self._strip_item_tier_prefix(item_name),
+                    "id": item_id or item_name,
+                    "tier": int(row["tier"]) if row.get("tier") is not None else None,
+                    "enchant": int(row["enchant"]) if row.get("enchant") is not None else 0,
+                }
+            )
+        if not normalized_items:
+            raise ValueError("No valid items to scan.")
+        normalized_items = self._apply_category_tier_filter(category_id=category, items=normalized_items)
+        if not normalized_items:
+            raise ValueError("No items left after tier filter.")
+        normalized_items.sort(
+            key=lambda item: (
+                item.get("base_name", ""),
+                item.get("tier") if item.get("tier") is not None else 999,
+                item.get("enchant", 0),
+            )
+        )
+
+        self._category_scan_stop.clear()
+        self._category_scan_running = True
+        self._category_scan_thread = threading.Thread(
+            target=self._category_scan_worker,
+            args=(category, normalized_items, market_city),
+            daemon=True,
+            name="category-scan",
+        )
+        self._category_scan_thread.start()
+        return {
+            "running": True,
+            "categoryId": category,
+            "city": market_city,
+            "totalItems": len(normalized_items),
+        }
+
+    def stop_category_scan(self) -> dict:
+        self._category_scan_stop.set()
+        return {"running": self._category_scan_running}
+
+    def _category_scan_worker(self, category: str, normalized_items: list[dict], city: str) -> None:
+        self._acquire_single_flight("runCategoryScan")
+        started_at = utc_now_iso()
+        self._emit_event(
+            "categoryScanStarted",
+            {
+                "categoryId": category,
+                "city": city,
+                "startedAt": started_at,
+                "totalItems": len(normalized_items),
+            },
+        )
+        self._emit_event("status", {"runtimeStatus": "Running"})
+
+        processed = 0
+        failures = 0
+        cancelled = False
+        break_anchor = time.monotonic()
+        try:
+            for idx, item in enumerate(normalized_items, start=1):
+                if self._category_scan_stop.is_set():
+                    cancelled = True
+                    break
+                if time.monotonic() - break_anchor >= self._category_break_every_seconds:
+                    self._emit_event(
+                        "log",
+                        {
+                            "level": "info",
+                            "message": f"Human break: pausing {self._category_break_duration_seconds:.0f}s before next item.",
+                        },
+                    )
+                    self._category_scan_stop.wait(self._category_break_duration_seconds)
+                    break_anchor = time.monotonic()
+                    if self._category_scan_stop.is_set():
+                        cancelled = True
+                        break
+                query_text = self._build_market_query_text(
+                    item_name=item["name"],
+                    tier=item.get("tier"),
+                    enchant=item.get("enchant", 0),
+                )
+                scan_result = self._execute_query_scan(
+                    query_text=query_text,
+                    item_id=item["id"],
+                    max_retries=self._max_retries,
+                )
+                if scan_result.value is not None:
+                    self._state.set_last_value(scan_result.value)
+                    self._logger.append_value(scan_result.value)
+                else:
+                    failures += 1
+                self._append_market_price_row(category, city, item, scan_result)
+                processed += 1
+                self._emit_event(
+                    "categoryScanItem",
+                    {
+                        "categoryId": category,
+                        "city": city,
+                        "index": idx,
+                        "totalItems": len(normalized_items),
+                        "failures": failures,
+                        "scanResult": scan_result.to_dict(),
+                        "item": item,
+                    },
+                )
+                if idx < len(normalized_items):
+                    self._category_scan_stop.wait(self._category_item_spacing_seconds)
+
+            finished_at = utc_now_iso()
+            summary = {
+                "categoryId": category,
+                "city": city,
+                "startedAt": started_at,
+                "finishedAt": finished_at,
+                "processed": processed,
+                "failures": failures,
+                "cancelled": cancelled,
+                "outputFile": str(self._market_prices_file.resolve()),
+            }
+            self._emit_event("categoryScanFinished", summary)
+        finally:
+            self._category_scan_running = False
+            self._emit_event("status", {"runtimeStatus": "Idle"})
+            self._release_single_flight()
+
+    def get_price_history(self, limit: int = 500) -> dict:
+        if not self._market_prices_file.exists():
+            return {"rows": [], "path": str(self._market_prices_file.resolve())}
+        with self._market_prices_file.open("r", encoding="utf-8", newline="") as fh:
+            rows = list(DictReader(fh))
+        rows = rows[-max(1, int(limit)) :]
+        rows.reverse()
+        return {"rows": rows, "path": str(self._market_prices_file.resolve())}
+
     def start_loop(self, interval_seconds: float) -> dict:
         if self._state.is_running():
             return {"running": True}
@@ -503,6 +678,112 @@ class BotService:
             json.dumps(payload, indent=2),
             encoding="utf-8",
         )
+
+    def _migrate_market_csv_if_legacy(self) -> None:
+        path = self._market_prices_file
+        if not path.exists() or path.stat().st_size == 0:
+            return
+        with path.open("r", encoding="utf-8", newline="") as fh:
+            header = next(csv.reader(fh), None)
+        if not header or "city" in header:
+            return
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        backup = path.with_name(f"{path.stem}_pre_city_{stamp}{path.suffix}")
+        shutil.move(str(path), str(backup))
+        self._emit_event(
+            "log",
+            {
+                "level": "info",
+                "message": f"Archived previous price log to {backup.name} (schema now includes city).",
+            },
+        )
+
+    def _append_market_price_row(
+        self, category_id: str, city: str, item: dict, scan_result: ScanResult
+    ) -> None:
+        self._migrate_market_csv_if_legacy()
+        fieldnames = [
+            "timestamp",
+            "city",
+            "category",
+            "item_name",
+            "item_id",
+            "tier",
+            "enchant",
+            "observed_price",
+            "raw_text",
+            "confidence",
+            "error",
+        ]
+        row = {
+            "timestamp": scan_result.timestamp,
+            "city": city,
+            "category": category_id,
+            "item_name": item.get("name"),
+            "item_id": item.get("id"),
+            "tier": item.get("tier"),
+            "enchant": item.get("enchant"),
+            "observed_price": scan_result.value,
+            "raw_text": scan_result.raw_text,
+            "confidence": scan_result.confidence,
+            "error": scan_result.error or "",
+        }
+        write_header = not self._market_prices_file.exists() or self._market_prices_file.stat().st_size == 0
+        with self._market_prices_file.open("a", encoding="utf-8", newline="") as fh:
+            writer = DictWriter(fh, fieldnames=fieldnames)
+            if write_header:
+                writer.writeheader()
+            writer.writerow(row)
+
+    @staticmethod
+    def _build_market_query_text(item_name: str, tier: int | None, enchant: int) -> str:
+        base_name = BotService._strip_item_tier_prefix(item_name)
+        if tier is None:
+            return base_name
+        return f"{base_name} {tier}.{max(0, int(enchant))}"
+
+    @staticmethod
+    def _strip_item_tier_prefix(item_name: str) -> str:
+        """Strip tier adjectives so queries match the in-game market (e.g. ``Light Crossbow 4.0``).
+
+        ao-bin-dumps EN-US strings use two patterns:
+        - Possessive on the tier word: ``Adept's Light Crossbow``
+        - Tier as its own token: ``Adept Mercenary's Trophy``, ``Expert Fiber Harvester Tome``
+        """
+        possessive = (
+            "Grandmaster's ",
+            "Journeyman's ",
+            "Novice's ",
+            "Master's ",
+            "Expert's ",
+            "Adept's ",
+            "Elder's ",
+        )
+        cleaned = item_name.strip()
+        for prefix in possessive:
+            if cleaned.startswith(prefix):
+                return cleaned[len(prefix) :].strip()
+        m = re.match(
+            r"^(?:Novice|Journeyman|Adept|Expert|Master|Grandmaster|Elder)\s+(.+)$",
+            cleaned,
+        )
+        if m:
+            return m.group(1).strip()
+        return cleaned
+
+    @staticmethod
+    def _apply_category_tier_filter(category_id: str, items: list[dict]) -> list[dict]:
+        min_tier_categories = {
+            "weapons",
+            "chest_armor",
+            "head_armor",
+            "foot_armor",
+            "bags",
+            "capes",
+        }
+        if category_id not in min_tier_categories:
+            return items
+        return [item for item in items if item.get("tier") is None or int(item["tier"]) >= 4]
 
     def _ensure_qt_app(self) -> QApplication:
         app = QApplication.instance()

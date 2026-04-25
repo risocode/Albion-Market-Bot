@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell, globalShortcut } = require("electron");
+const { app, BrowserWindow, ipcMain, Menu } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const { spawn } = require("child_process");
@@ -31,8 +31,10 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
     },
+    autoHideMenuBar: true,
   });
 
+  mainWindow.setMenuBarVisibility(false);
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
 }
 
@@ -100,35 +102,6 @@ function emitEvent(event, payload) {
   emitRawEvent({ type: "event", event, payload });
 }
 
-function emitShortcut(action) {
-  if (!mainWindow || mainWindow.isDestroyed()) {
-    return;
-  }
-  mainWindow.webContents.send("bot:shortcut", { action });
-}
-
-function registerGlobalShortcuts() {
-  const shortcutMap = {
-    "CommandOrControl+Shift+S": "captureSearchPoint",
-    "CommandOrControl+Shift+R": "captureRegion",
-    "CommandOrControl+Shift+Q": "runQueryOnce",
-    "CommandOrControl+Shift+W": "runWatchlistScan",
-    "CommandOrControl+Shift+L": "startWatchlistLoop",
-    "CommandOrControl+Shift+X": "stopWatchlistLoop",
-    "CommandOrControl+Shift+H": "refreshState",
-  };
-
-  Object.entries(shortcutMap).forEach(([accelerator, action]) => {
-    const ok = globalShortcut.register(accelerator, () => emitShortcut(action));
-    if (!ok) {
-      emitEvent("log", {
-        level: "warn",
-        message: `Could not register shortcut: ${accelerator}`,
-      });
-    }
-  });
-}
-
 function sendRequest(command, payload = {}) {
   if (!backend || backend.killed) {
     return Promise.reject(new Error("Python backend is not running."));
@@ -162,36 +135,50 @@ ipcMain.handle("bot:request", async (_event, command, payload) => {
   return response.payload;
 });
 
-ipcMain.handle("bot:open-log-file", async () => {
-  const csvPath = path.join(process.cwd(), "capture_log.csv");
-  await shell.openPath(csvPath);
-  return true;
-});
-
-ipcMain.handle("bot:open-recommendations-file", async () => {
-  const csvPath = path.join(process.cwd(), "recommendations_log.csv");
-  await shell.openPath(csvPath);
-  return true;
-});
-
 ipcMain.handle("items:catalog", async (_event, options = {}) => {
   const force = Boolean(options.force);
   return ensureItemCatalog(userDataPath, { force });
 });
 
+ipcMain.handle("window:minimize", async () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.minimize();
+  }
+  return true;
+});
+
+ipcMain.handle("window:restore", async () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) {
+      mainWindow.restore();
+    }
+    mainWindow.show();
+    mainWindow.focus();
+  }
+  return true;
+});
+
+ipcMain.handle("window:set-progress", async (_event, value) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric) && numeric >= 0 && numeric <= 1) {
+      mainWindow.setProgressBar(numeric);
+    } else {
+      mainWindow.setProgressBar(-1);
+    }
+  }
+  return true;
+});
+
 app.whenReady().then(() => {
+  Menu.setApplicationMenu(null);
   createWindow();
   startBackend();
-  registerGlobalShortcuts();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
     }
   });
-});
-
-app.on("will-quit", () => {
-  globalShortcut.unregisterAll();
 });
 
 app.on("window-all-closed", () => {

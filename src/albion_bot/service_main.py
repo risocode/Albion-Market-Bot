@@ -58,6 +58,7 @@ class ServiceHost:
         mapping = {
             "getState": lambda _payload: self._service.get_state(),
             "captureCursor": lambda _payload: self._service.capture_cursor(),
+            "selectPoint": lambda _payload: self._service.select_point(),
             "selectRegion": lambda _payload: self._service.select_region(),
             "setSearchPoint": lambda payload: self._service.set_search_point(
                 x=int(payload["x"]),
@@ -105,6 +106,15 @@ class ServiceHost:
                 post_search_delay_seconds=float(payload["postSearchDelaySeconds"]),
                 jitter_ratio=float(payload["jitterRatio"]),
                 key_delay_base_ms=int(payload["keyDelayBaseMs"]),
+            ),
+            "runCategoryScan": lambda payload: self._service.run_category_scan(
+                category_id=str(payload["categoryId"]),
+                items=payload.get("items", []),
+                city=str(payload.get("city") or ""),
+            ),
+            "stopCategoryScan": lambda _payload: self._service.stop_category_scan(),
+            "getPriceHistory": lambda payload: self._service.get_price_history(
+                limit=int(payload.get("limit", 500))
             ),
         }
         if command not in mapping:

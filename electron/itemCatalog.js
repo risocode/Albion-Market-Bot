@@ -8,7 +8,7 @@ const ITEMS_JSON_URL =
 const CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Bumps when catalog shape changes; stale files are rebuilt. */
-const CATALOG_SCHEMA_VERSION = 2;
+const CATALOG_SCHEMA_VERSION = 5;
 
 const CATEGORY_ORDER = [
   { id: "helmets", label: "Helmets", icon: "⛑" },
@@ -17,6 +17,24 @@ const CATEGORY_ORDER = [
   { id: "weapons", label: "Weapons", icon: "⚔" },
   { id: "offhand", label: "Off Hand", icon: "📦" },
   { id: "other", label: "Other", icon: "📋" },
+];
+
+const EXACT_CATEGORY_ORDER = [
+  { id: "weapons", label: "Weapons" },
+  { id: "chest_armor", label: "Chest Armor" },
+  { id: "head_armor", label: "Head Armor" },
+  { id: "foot_armor", label: "Foot Armor" },
+  { id: "off_hands", label: "Off-Hands" },
+  { id: "capes", label: "Capes" },
+  { id: "bags", label: "Bags" },
+  { id: "mount", label: "Mount" },
+  { id: "consumable", label: "Consumable" },
+  { id: "gathering_equipment", label: "Gathering Equipment" },
+  { id: "crafting", label: "Crafting" },
+  { id: "artifact", label: "Artifact" },
+  { id: "farming", label: "Farming" },
+  { id: "furniture", label: "Furniture" },
+  { id: "vanity", label: "Vanity" },
 ];
 
 function categorizeUniqueName(uniqueName) {
@@ -43,6 +61,52 @@ function categorizeUniqueName(uniqueName) {
     return "weapons";
   }
   return "other";
+}
+
+function categorizeExactGroup(uniqueName) {
+  if (!uniqueName || typeof uniqueName !== "string") {
+    return "consumable";
+  }
+  const u = uniqueName.toUpperCase();
+  if (
+    u.includes("ARTEFACT") ||
+    u.includes("ARTIFACT") ||
+    u.includes("_RUNE") ||
+    u.includes("_SOUL") ||
+    u.includes("_RELIC")
+  ) {
+    return "artifact";
+  }
+  if (u.includes("_MAIN_") || (u.includes("_2H_") && !u.includes("_2H_TOOL_"))) return "weapons";
+  if (u.includes("_ARMOR_")) return "chest_armor";
+  if (u.includes("_HEAD_")) return "head_armor";
+  if (u.includes("_SHOES_")) return "foot_armor";
+  if (u.includes("_OFF_")) return "off_hands";
+  if (u.includes("CAPE")) return "capes";
+  /** Wearable inventory bags only (e.g. T4_BAG, T4_BAG_INSIGHT@1). Not LOOTBAG, not "CABBAGE". */
+  if (/^T\d+_BAG/i.test(uniqueName)) return "bags";
+  if (u.includes("MOUNT")) return "mount";
+  if (u.includes("2H_TOOL_") || u.includes("_TOOL_")) return "gathering_equipment";
+  if (
+    u.includes("FARM") ||
+    u.includes("SEED") ||
+    u.includes("BABY") ||
+    u.includes("MOUNT_GROWN")
+  ) {
+    return "farming";
+  }
+  if (u.includes("FURNITURE") || u.includes("HOUSE") || u.includes("TROPHY")) return "furniture";
+  if (u.includes("VANITY") || u.includes("SKIN")) return "vanity";
+  if (
+    u.includes("MATERIAL") ||
+    u.includes("METALBAR") ||
+    u.includes("PLANK") ||
+    u.includes("CLOTH") ||
+    u.includes("LEATHER")
+  ) {
+    return "crafting";
+  }
+  return "consumable";
 }
 
 /**
@@ -122,6 +186,7 @@ function buildCatalogFromRaw(rawList) {
     offhand: [],
     other: [],
   };
+  const exactBuckets = Object.fromEntries(EXACT_CATEGORY_ORDER.map((c) => [c.id, []]));
 
   for (const row of rawList) {
     const id = row.UniqueName;
@@ -136,6 +201,7 @@ function buildCatalogFromRaw(rawList) {
       id,
       name,
       category,
+      exactCategoryId: categorizeExactGroup(id),
       tier,
       enchant,
       /** Item quality (Normal…Masterpiece) is not in this dataset. */
@@ -144,6 +210,7 @@ function buildCatalogFromRaw(rawList) {
     };
     item.searchHaystack = buildSearchHaystack(item);
     buckets[category].push(item);
+    exactBuckets[item.exactCategoryId].push(item);
   }
 
   const collator = new Intl.Collator("en", { sensitivity: "base" });
@@ -161,11 +228,18 @@ function buildCatalogFromRaw(rawList) {
       return (a.enchant ?? 0) - (b.enchant ?? 0);
     });
   }
+  for (const key of Object.keys(exactBuckets)) {
+    exactBuckets[key].sort((a, b) => collator.compare(a.name, b.name));
+  }
 
   const categories = CATEGORY_ORDER.map((meta) => ({
     ...meta,
     count: buckets[meta.id].length,
     items: buckets[meta.id],
+  }));
+  const exactCategories = EXACT_CATEGORY_ORDER.map((meta) => ({
+    ...meta,
+    count: exactBuckets[meta.id].length,
   }));
 
   return {
@@ -173,6 +247,7 @@ function buildCatalogFromRaw(rawList) {
     source: ITEMS_JSON_URL,
     itemCount: rawList.length,
     categories,
+    exactCategories,
   };
 }
 

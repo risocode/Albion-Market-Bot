@@ -1,20 +1,48 @@
+/** Royal + Caerleon + Brecilien — set your character in this city’s market before fetching. */
+const MARKET_CITIES = [
+  "Bridgewatch",
+  "Martlock",
+  "Thetford",
+  "Fort Sterling",
+  "Lymhurst",
+  "Caerleon",
+  "Brecilien",
+];
+
+const FETCH_CITY_STORAGE_KEY = "albionMarketFetchCity";
+
+const EXACT_CATEGORY_ORDER = [
+  { id: "weapons", label: "Weapons" },
+  { id: "chest_armor", label: "Chest Armor" },
+  { id: "head_armor", label: "Head Armor" },
+  { id: "foot_armor", label: "Foot Armor" },
+  { id: "off_hands", label: "Off-Hands" },
+  { id: "capes", label: "Capes" },
+  { id: "bags", label: "Bags" },
+  { id: "mount", label: "Mount" },
+  { id: "consumable", label: "Consumable" },
+  { id: "gathering_equipment", label: "Gathering Equipment" },
+  { id: "crafting", label: "Crafting" },
+  { id: "artifact", label: "Artifact" },
+  { id: "farming", label: "Farming" },
+  { id: "furniture", label: "Furniture" },
+  { id: "vanity", label: "Vanity" },
+];
+
 const state = {
-  activePage: "dashboard",
-  latestValue: null,
-  runtimeStatus: "Idle",
-  recentRows: [],
-  opportunities: [],
+  activeTab: "items",
   watchlist: [],
   watchFilter: "",
   catalogFilter: "",
   itemCatalog: null,
-  lastQuery: "scholar robe 5.1",
-  sessionStats: {
-    scanBatches: 0,
-    successRate: 0,
-    avgScore: 0,
-    topScore: 0,
-  },
+  liveRows: [],
+  historyRows: [],
+  isCategoryFetchRunning: false,
+  categoryProgress: { done: 0, total: 0, failures: 0, item: "", category: "", city: "" },
+  searchPoint: null,
+  region: null,
+  draftSearchPoint: null,
+  draftRegion: null,
 };
 
 const CATALOG_RENDER_CAP = 400;
@@ -24,10 +52,57 @@ function byId(id) {
   return document.getElementById(id);
 }
 
+function formatRowTime(iso) {
+  if (!iso || typeof iso !== "string") return "-";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso.slice(0, 19);
+  return d.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function renderFetchCityOptions() {
+  const sel = byId("select-fetch-city");
+  if (!sel) return;
+  const saved = localStorage.getItem(FETCH_CITY_STORAGE_KEY);
+  sel.innerHTML = "";
+  for (const c of MARKET_CITIES) {
+    const opt = document.createElement("option");
+    opt.value = c;
+    opt.textContent = c;
+    sel.appendChild(opt);
+  }
+  if (saved && MARKET_CITIES.includes(saved)) {
+    sel.value = saved;
+  }
+}
+
+function setFetchCityModalVisible(visible) {
+  const modal = byId("fetch-city-modal");
+  if (!modal) return;
+  modal.classList.toggle("is-hidden", !visible);
+}
+
+function openFetchCityModal() {
+  const categoryId = byId("select-fetch-category").value;
+  const categoryMeta = EXACT_CATEGORY_ORDER.find((c) => c.id === categoryId);
+  const summary = byId("fetch-city-summary");
+  if (summary) {
+    summary.textContent = `Category: ${categoryMeta?.label || categoryId}`;
+  }
+  renderFetchCityOptions();
+  setFetchCityModalVisible(true);
+}
+
 function logLine(message) {
   const panel = byId("log-panel");
+  if (!panel) return;
   const stamp = new Date().toLocaleTimeString();
-  panel.textContent = `[${stamp}] ${message}\n${panel.textContent}`.slice(0, 8000);
+  panel.textContent = `[${stamp}] ${message}\n${panel.textContent}`.slice(0, 12000);
 }
 
 function setBackendStatus(text) {
@@ -40,46 +115,113 @@ function parseNumberInput(id, fallback = 0) {
   return Number.isFinite(val) ? val : fallback;
 }
 
-function setActivePage(pageId) {
-  state.activePage = pageId;
-  document.querySelectorAll(".nav-btn").forEach((btn) => {
-    btn.classList.toggle("is-active", btn.dataset.page === pageId);
-  });
-  document.querySelectorAll(".page").forEach((page) => {
-    page.classList.toggle("is-visible", page.dataset.page === pageId);
-  });
-  const titleMap = {
-    dashboard: "Dashboard",
-    items: "Items",
-    check: "Check",
-    buy: "Buy",
-    auction: "Auction Helper",
-    settings: "Settings",
-  };
-  byId("page-title").textContent = titleMap[pageId] ?? "Dashboard";
-
-  if (pageId === "items" && !state.itemCatalog) {
-    loadItemCatalog(false).catch(() => {});
+async function request(command, payload = {}) {
+  try {
+    return await window.botApi.request(command, payload);
+  } catch (error) {
+    logLine(`Request ${command} failed: ${error.message}`);
+    throw error;
   }
 }
 
-function renderDashboard() {
-  byId("runtime-status").textContent = state.runtimeStatus;
-  byId("last-value").textContent = state.latestValue == null ? "--" : String(state.latestValue);
-  byId("active-query").textContent = state.lastQuery;
-  byId("metric-scan-batches").textContent = String(state.sessionStats.scanBatches ?? 0);
-  byId("metric-success-rate").textContent = `${state.sessionStats.successRate ?? 0}%`;
-  byId("metric-avg-score").textContent = String(state.sessionStats.avgScore ?? 0);
-  byId("metric-top-score").textContent = String(state.sessionStats.topScore ?? 0);
+function setActiveTab(tab) {
+  state.activeTab = tab;
+  document.querySelectorAll(".tab-btn").forEach((btn) => {
+    btn.classList.toggle("is-active", btn.dataset.tab === tab);
+  });
+  document.querySelectorAll(".tab-panel").forEach((panel) => {
+    panel.classList.toggle("is-active", panel.dataset.tab === tab);
+  });
 }
 
-function renderItems() {
+function setHelpVisible(visible) {
+  const modal = byId("help-modal");
+  if (!modal) return;
+  modal.classList.toggle("is-hidden", !visible);
+}
+
+function renderCategorySelector() {
+  const select = byId("select-fetch-category");
+  if (!select) return;
+  const counts = new Map((state.itemCatalog?.exactCategories || []).map((c) => [c.id, c.count]));
+  const previous = select.value;
+  select.innerHTML = "";
+  for (const c of EXACT_CATEGORY_ORDER) {
+    const opt = document.createElement("option");
+    opt.value = c.id;
+    opt.textContent = `${c.label} (${counts.get(c.id) || 0})`;
+    select.appendChild(opt);
+  }
+  if (previous && [...select.options].some((o) => o.value === previous)) {
+    select.value = previous;
+  }
+}
+
+function renderCategoryProgress() {
+  const node = byId("category-fetch-status");
+  const progress = state.categoryProgress;
+  const btn = byId("btn-start-category-fetch");
+  const stopBtn = byId("btn-stop-category-fetch");
+  if (btn) {
+    btn.disabled = state.isCategoryFetchRunning;
+  }
+  if (stopBtn) {
+    stopBtn.disabled = !state.isCategoryFetchRunning;
+  }
+  if (!node) return;
+  if (!state.isCategoryFetchRunning && progress.total === 0) {
+    node.textContent = "Idle";
+    return;
+  }
+  if (!state.isCategoryFetchRunning) {
+    node.textContent = `Done: ${progress.done}/${progress.total}, failures: ${progress.failures}${progress.city ? ` · ${progress.city}` : ""}`;
+    return;
+  }
+  node.textContent = `Scanning ${progress.category}${progress.city ? ` @ ${progress.city}` : ""}: ${progress.done}/${progress.total}, failures: ${progress.failures}, current: ${progress.item || "-"}`;
+}
+
+function renderCalibrationStatus() {
+  const node = byId("calibration-status");
+  if (!node) return;
+  const hasPoint = Boolean(state.searchPoint && Number.isFinite(state.searchPoint.x));
+  const hasRegion = Boolean(state.region && Number.isFinite(state.region.width) && state.region.width > 2);
+  if (hasPoint && hasRegion) {
+    node.textContent = `Calibration status: ready (search: ${state.searchPoint.x},${state.searchPoint.y} | region: ${state.region.width}x${state.region.height})`;
+    return;
+  }
+  const missing = [];
+  if (!hasPoint) missing.push("search point");
+  if (!hasRegion) missing.push("price region");
+  node.textContent = `Calibration status: missing ${missing.join(" + ")}`;
+}
+
+function renderCalibrationDraftStatus() {
+  const node = byId("calibration-draft-status");
+  if (!node) return;
+  const hasDraftPoint = Boolean(state.draftSearchPoint);
+  const hasDraftRegion = Boolean(state.draftRegion);
+  if (!hasDraftPoint && !hasDraftRegion) {
+    node.textContent = "Pending changes: none";
+  } else {
+    const chunks = [];
+    if (hasDraftPoint) chunks.push("Search Point");
+    if (hasDraftRegion) chunks.push("OCR Region");
+    node.textContent = `Pending changes: ${chunks.join(" + ")} (click Save)`;
+  }
+  const savePointBtn = byId("btn-save-search-point");
+  const saveRegionBtn = byId("btn-save-price-region");
+  if (savePointBtn) savePointBtn.disabled = !hasDraftPoint;
+  if (saveRegionBtn) saveRegionBtn.disabled = !hasDraftRegion;
+}
+
+function renderWatchlist() {
   const watchBody = byId("watchlist-body");
   const filterText = state.watchFilter.trim().toLowerCase();
   const filtered = state.watchlist.filter((item) => {
     if (!filterText) return true;
     return item.queryText.toLowerCase().includes(filterText);
   });
+
   watchBody.innerHTML = "";
   for (const item of filtered) {
     const tr = document.createElement("tr");
@@ -92,6 +234,7 @@ function renderItems() {
     `;
     watchBody.appendChild(tr);
   }
+
   watchBody.querySelectorAll("[data-action='toggle-watch']").forEach((el) => {
     el.addEventListener("change", async () => {
       await request("toggleWatchItem", { itemId: el.dataset.id });
@@ -106,76 +249,80 @@ function renderItems() {
   });
 }
 
-function renderCheck() {
-  const body = byId("results-body");
+function renderLiveRows() {
+  const body = byId("live-prices-body");
+  if (!body) return;
   body.innerHTML = "";
-  for (const row of state.recentRows.slice(0, 40)) {
+  for (const row of state.liveRows) {
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${row.timestamp}</td><td>${row.query}</td><td>${row.value ?? "--"}</td><td>${row.rawText ?? ""}</td>`;
+    tr.innerHTML = `
+      <td>${formatRowTime(row.timestamp)}</td>
+      <td>${row.city || "-"}</td>
+      <td>${row.category || "-"}</td>
+      <td>${row.item_name || row.queryText || "-"}</td>
+      <td>${row.observed_price ?? row.value ?? "--"}</td>
+      <td>${row.confidence ?? "--"}</td>
+      <td>${row.error || ""}</td>
+    `;
     body.appendChild(tr);
   }
 }
 
-function renderOpportunities() {
-  const oppBody = byId("opportunities-body");
-  oppBody.innerHTML = "";
-  for (const opp of state.opportunities.slice(0, 80)) {
+function renderHistoryRows() {
+  const body = byId("history-prices-body");
+  if (!body) return;
+  body.innerHTML = "";
+  for (const row of state.historyRows) {
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td>${opp.timestamp}</td>
-      <td>${opp.queryText}</td>
-      <td>${opp.observedValue ?? "--"}</td>
-      <td>${opp.targetPrice ?? "--"}</td>
-      <td>${opp.deltaPct ?? "--"}</td>
-      <td>${opp.score ?? "--"}</td>
-      <td class="label-${opp.label}">${opp.label}</td>
+      <td>${formatRowTime(row.timestamp)}</td>
+      <td>${row.city || "-"}</td>
+      <td>${row.category || "-"}</td>
+      <td>${row.item_name || "-"}</td>
+      <td>${row.observed_price ?? "--"}</td>
+      <td>${row.tier ?? "-"}</td>
+      <td>${row.enchant ?? "-"}</td>
+      <td>${row.error || ""}</td>
     `;
-    oppBody.appendChild(tr);
-  }
-}
-
-function renderAll() {
-  byId("top-status-line").textContent = `Runtime status: ${state.runtimeStatus}`;
-  renderDashboard();
-  renderItems();
-  renderCheck();
-  renderOpportunities();
-}
-
-async function request(command, payload = {}) {
-  try {
-    return await window.botApi.request(command, payload);
-  } catch (error) {
-    logLine(`Request ${command} failed: ${error.message}`);
-    throw error;
+    body.appendChild(tr);
   }
 }
 
 async function refreshWatchlist() {
   state.watchlist = await request("listWatchItems");
-  renderAll();
+  renderWatchlist();
 }
 
-async function refreshOpportunities() {
-  state.opportunities = await request("getRecentOpportunities", { limit: 100 });
-  state.sessionStats = await request("getSessionStats");
+async function refreshCalibrationState() {
+  try {
+    const snapshot = await request("getState");
+    state.searchPoint = snapshot.searchPoint || null;
+    state.region = snapshot.region || null;
+    state.draftSearchPoint = null;
+    state.draftRegion = null;
+    renderCalibrationStatus();
+    renderCalibrationDraftStatus();
+  } catch (error) {
+    logLine(`Failed to load calibration state: ${error.message}`);
+  }
 }
 
 async function loadItemCatalog(force = false) {
   const statusEl = byId("catalog-status");
   if (statusEl) {
     statusEl.textContent = force
-      ? "Refreshing catalog…"
-      : "Loading catalog (first run may download ~24 MB)…";
+      ? "Refreshing catalog..."
+      : "Loading catalog (first run may download ~24 MB)...";
   }
   try {
     const data = await window.botApi.loadItemCatalog({ force });
     state.itemCatalog = data;
-    const when = data.fetchedAt ? new Date(data.fetchedAt).toLocaleString() : "—";
+    const when = data.fetchedAt ? new Date(data.fetchedAt).toLocaleString() : "-";
     const src = data.fromCache ? "cache" : "network";
     if (statusEl) {
       statusEl.textContent = `${data.itemCount.toLocaleString()} items · ${src} · ${when}`;
     }
+    renderCategorySelector();
     renderCatalogAccordion();
     logLine(`Item catalog ready (${data.itemCount} rows, ${src})`);
   } catch (error) {
@@ -188,17 +335,13 @@ async function loadItemCatalog(force = false) {
 
 function renderCatalogAccordion() {
   const root = byId("catalog-accordion");
-  if (!root) {
-    return;
-  }
+  if (!root) return;
   root.replaceChildren();
+
   const cat = state.itemCatalog;
-  if (!cat?.categories) {
-    return;
-  }
+  if (!cat?.categories) return;
 
   const filt = state.catalogFilter.trim().toLowerCase();
-
   for (const section of cat.categories) {
     const items = filt
       ? section.items.filter((it) => {
@@ -206,15 +349,11 @@ function renderCatalogAccordion() {
           return hay.includes(filt);
         })
       : section.items;
-    if (filt && items.length === 0) {
-      continue;
-    }
+    if (filt && items.length === 0) continue;
 
     const details = document.createElement("details");
     details.className = "catalog-section";
-    if (filt) {
-      details.open = true;
-    }
+    if (filt) details.open = true;
 
     const summary = document.createElement("summary");
     const label = document.createElement("span");
@@ -233,33 +372,23 @@ function renderCatalogAccordion() {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "catalog-item";
+
       const nameSpan = document.createElement("span");
       nameSpan.className = "catalog-item-name";
       nameSpan.textContent = it.name;
       btn.appendChild(nameSpan);
+
       const metaBits = [];
-      if (it.tier != null) {
-        metaBits.push(`T${it.tier}`);
-      }
-      if (it.enchant > 0) {
-        metaBits.push(`.${it.enchant}`);
-      }
+      if (it.tier != null) metaBits.push(`T${it.tier}`);
+      if (it.enchant > 0) metaBits.push(`.${it.enchant}`);
       if (metaBits.length) {
         const meta = document.createElement("span");
         meta.className = "catalog-item-meta";
         meta.textContent = metaBits.join(" ");
         btn.appendChild(meta);
       }
-      const tierEnc =
-        it.tier != null || it.enchant > 0
-          ? [
-              "Tier / enchant (from item ID):",
-              it.tier != null ? `  Tier: ${it.tier} (T prefix)` : "  Tier: not in ID prefix",
-              it.enchant > 0 ? `  Enchant: .${it.enchant} (@ suffix)` : "  Enchant: flat (no @)",
-            ].join("\n")
-          : null;
-      const tip = [it.id, tierEnc, "Quality (Normal–Masterpiece): not in this file — pick in market."].filter(Boolean).join("\n");
-      btn.title = tip;
+
+      btn.title = `${it.id}\nQuality (Normal-Masterpiece) is selected in market UI.`;
       btn.addEventListener("click", () => {
         byId("input-watch-query").value = it.name;
         logLine(`Filled query from catalog: ${it.name}`);
@@ -271,156 +400,140 @@ function renderCatalogAccordion() {
     if (items.length > CATALOG_RENDER_CAP) {
       const more = document.createElement("div");
       more.className = "catalog-more";
-      more.textContent = `… and ${items.length - CATALOG_RENDER_CAP} more — refine search`;
+      more.textContent = `... and ${items.length - CATALOG_RENDER_CAP} more - refine search`;
       details.appendChild(more);
     }
-
     root.appendChild(details);
   }
 }
 
-async function refreshState() {
-  const snapshot = await request("getState");
-  state.runtimeStatus = snapshot.runtimeStatus;
-  state.latestValue = snapshot.lastValue;
-  state.lastQuery = snapshot.queryText;
-  state.watchlist = snapshot.watchlist || [];
-  state.sessionStats = snapshot.sessionStats || state.sessionStats;
-  if (snapshot.searchPoint) {
-    byId("input-search-x").value = snapshot.searchPoint.x;
-    byId("input-search-y").value = snapshot.searchPoint.y;
-  }
-  if (snapshot.region) {
-    byId("input-region-left").value = snapshot.region.left;
-    byId("input-region-top").value = snapshot.region.top;
-    byId("input-region-width").value = snapshot.region.width;
-    byId("input-region-height").value = snapshot.region.height;
-  }
-  byId("input-query").value = snapshot.queryText;
-  byId("input-interval").value = snapshot.captureIntervalSeconds;
-  byId("input-settle").value = snapshot.humanization.settleDelaySeconds;
-  byId("input-post").value = snapshot.humanization.postSearchDelaySeconds;
-  byId("input-jitter").value = snapshot.humanization.jitterRatio;
-  byId("input-key-delay-ms").value = snapshot.humanization.keyDelayBaseMs;
-  byId("diagnostics").textContent = JSON.stringify(snapshot.diagnostics, null, 2);
-  await refreshOpportunities();
-  renderAll();
+function collectItemsForCategory(categoryId) {
+  if (!state.itemCatalog?.categories) return [];
+  const allItems = state.itemCatalog.categories.flatMap((section) => section.items || []);
+  const inferCategoryFromId = (id = "") => {
+    const u = String(id).toUpperCase();
+    if (u.includes("ARTEFACT") || u.includes("ARTIFACT") || u.includes("_RUNE") || u.includes("_SOUL") || u.includes("_RELIC")) return "artifact";
+    if (u.includes("_MAIN_") || (u.includes("_2H_") && !u.includes("_2H_TOOL_"))) return "weapons";
+    if (u.includes("_ARMOR_")) return "chest_armor";
+    if (u.includes("_HEAD_")) return "head_armor";
+    if (u.includes("_SHOES_")) return "foot_armor";
+    if (u.includes("_OFF_")) return "off_hands";
+    if (u.includes("CAPE")) return "capes";
+    if (/^T\d+_BAG/i.test(id)) return "bags";
+    if (u.includes("MOUNT")) return "mount";
+    if (u.includes("_TOOL_")) return "gathering_equipment";
+    if (u.includes("FARM") || u.includes("SEED") || u.includes("BABY") || u.includes("MOUNT_GROWN")) return "farming";
+    if (u.includes("FURNITURE") || u.includes("HOUSE") || u.includes("TROPHY")) return "furniture";
+    if (u.includes("VANITY") || u.includes("SKIN")) return "vanity";
+    if (u.includes("MATERIAL") || u.includes("METALBAR") || u.includes("PLANK") || u.includes("CLOTH") || u.includes("LEATHER")) return "crafting";
+    return "consumable";
+  };
+  return allItems
+    .filter((item) => (item.exactCategoryId || inferCategoryFromId(item.id)) === categoryId)
+    .map((item) => ({
+      id: item.id,
+      name: item.name,
+      tier: item.tier,
+      enchant: item.enchant,
+    }));
 }
 
-function wireNavigation() {
-  document.querySelectorAll(".nav-btn").forEach((btn) => {
-    btn.addEventListener("click", () => setActivePage(btn.dataset.page));
+async function loadPriceHistory() {
+  try {
+    const payload = await window.botApi.getPriceHistory(1000);
+    state.historyRows = payload.rows || [];
+    renderHistoryRows();
+  } catch (error) {
+    logLine(`History load failed: ${error.message}`);
+  }
+}
+
+function openStartFetchFlow() {
+  if (state.isCategoryFetchRunning) return;
+  openFetchCityModal();
+}
+
+async function startCategoryFetchWithCity(city) {
+  if (state.isCategoryFetchRunning) return;
+  const marketCity = String(city || "").trim();
+  if (!marketCity) {
+    logLine("Choose a city before starting.");
+    return;
+  }
+  await refreshCalibrationState();
+  if (!state.searchPoint || !state.region) {
+    logLine("Cannot start fetch: calibrate Search Point and Price Region first.");
+    return;
+  }
+  const categoryId = byId("select-fetch-category").value;
+  const categoryMeta = EXACT_CATEGORY_ORDER.find((c) => c.id === categoryId);
+  let items = collectItemsForCategory(categoryId);
+  if (items.length === 0) {
+    // Auto-recover from stale cached catalog schema.
+    await loadItemCatalog(true);
+    items = collectItemsForCategory(categoryId);
+  }
+  if (items.length === 0) {
+    logLine(`No items mapped for category: ${categoryMeta?.label || categoryId}`);
+    return;
+  }
+
+  state.isCategoryFetchRunning = true;
+  state.categoryProgress = {
+    done: 0,
+    total: items.length,
+    failures: 0,
+    item: "",
+    category: categoryMeta?.label || categoryId,
+    city: marketCity,
+  };
+  renderCategoryProgress();
+  await window.botApi.setWindowProgress(0);
+  await window.botApi.minimizeWindow();
+  logLine(
+    `Starting category fetch: ${categoryMeta?.label || categoryId} @ ${marketCity} (${items.length} items)`,
+  );
+
+  try {
+    logLine("Electron minimized. Keep Albion market window focused.");
+    await window.botApi.runCategoryScan(categoryId, items, marketCity);
+    logLine("Category fetch started.");
+  } catch (error) {
+    logLine(`Category fetch failed: ${error.message}`);
+    state.isCategoryFetchRunning = false;
+    renderCategoryProgress();
+    await window.botApi.setWindowProgress(-1);
+    await window.botApi.restoreWindow();
+  }
+}
+
+function wireTabs() {
+  document.querySelectorAll(".tab-btn").forEach((btn) => {
+    btn.addEventListener("click", () => setActiveTab(btn.dataset.tab));
   });
 }
 
 function wireActions() {
-  byId("btn-refresh-state").addEventListener("click", refreshState);
-  byId("btn-open-log").addEventListener("click", () => window.botApi.openLogFile());
   byId("input-watch-filter").addEventListener("input", (event) => {
     state.watchFilter = event.target.value;
-    renderItems();
+    renderWatchlist();
   });
 
   const catalogFilterInput = byId("input-catalog-filter");
-  if (catalogFilterInput) {
-    catalogFilterInput.addEventListener("input", (event) => {
-      state.catalogFilter = event.target.value;
-      clearTimeout(catalogFilterDebounce);
-      catalogFilterDebounce = setTimeout(() => renderCatalogAccordion(), 140);
-    });
-  }
-
-  const btnCatalogClear = byId("btn-catalog-clear");
-  if (btnCatalogClear) {
-    btnCatalogClear.addEventListener("click", () => {
-      state.catalogFilter = "";
-      if (catalogFilterInput) {
-        catalogFilterInput.value = "";
-      }
-      renderCatalogAccordion();
-    });
-  }
-
-  const btnCatalogRefresh = byId("btn-catalog-refresh");
-  if (btnCatalogRefresh) {
-    btnCatalogRefresh.addEventListener("click", async () => {
-      await loadItemCatalog(true);
-    });
-  }
-
-  byId("btn-run-once").addEventListener("click", async () => {
-    state.lastQuery = byId("input-query").value.trim() || state.lastQuery;
-    await request("setQueryText", { queryText: state.lastQuery });
-    await request("runQueryOnce");
-    logLine("Triggered runQueryOnce");
+  catalogFilterInput.addEventListener("input", (event) => {
+    state.catalogFilter = event.target.value;
+    clearTimeout(catalogFilterDebounce);
+    catalogFilterDebounce = setTimeout(() => renderCatalogAccordion(), 140);
   });
 
-  byId("btn-start-loop").addEventListener("click", async () => {
-    state.lastQuery = byId("input-query").value.trim() || state.lastQuery;
-    await request("setQueryText", { queryText: state.lastQuery });
-    await request("startLoop", { intervalSeconds: parseNumberInput("input-interval", 1) });
-    logLine("Loop started");
+  byId("btn-catalog-clear").addEventListener("click", () => {
+    state.catalogFilter = "";
+    catalogFilterInput.value = "";
+    renderCatalogAccordion();
   });
 
-  byId("btn-stop-loop").addEventListener("click", async () => {
-    await request("stopLoop");
-    logLine("Loop stopped");
-  });
-
-  byId("btn-capture-search-point").addEventListener("click", async () => {
-    const point = await request("captureCursor");
-    byId("input-search-x").value = point.x;
-    byId("input-search-y").value = point.y;
-    await request("setSearchPoint", point);
-    logLine(`Search point captured: ${point.x},${point.y}`);
-    await refreshState();
-  });
-
-  byId("btn-apply-search-point").addEventListener("click", async () => {
-    const payload = {
-      x: parseNumberInput("input-search-x", 0),
-      y: parseNumberInput("input-search-y", 0),
-    };
-    await request("setSearchPoint", payload);
-    logLine(`Search point applied: ${payload.x},${payload.y}`);
-  });
-
-  byId("btn-select-region").addEventListener("click", async () => {
-    const region = await request("selectRegion");
-    if (!region) {
-      logLine("Region selection cancelled");
-      return;
-    }
-    byId("input-region-left").value = region.left;
-    byId("input-region-top").value = region.top;
-    byId("input-region-width").value = region.width;
-    byId("input-region-height").value = region.height;
-    await request("setRegion", region);
-    logLine(`Region selected ${region.width}x${region.height}`);
-    await refreshState();
-  });
-
-  byId("btn-apply-region").addEventListener("click", async () => {
-    const region = {
-      left: parseNumberInput("input-region-left", 0),
-      top: parseNumberInput("input-region-top", 0),
-      width: parseNumberInput("input-region-width", 0),
-      height: parseNumberInput("input-region-height", 0),
-    };
-    await request("setRegion", region);
-    logLine(`Region applied ${region.width}x${region.height}`);
-  });
-
-  byId("btn-apply-humanization").addEventListener("click", async () => {
-    const payload = {
-      settleDelaySeconds: parseNumberInput("input-settle", 0.35),
-      postSearchDelaySeconds: parseNumberInput("input-post", 0.6),
-      jitterRatio: parseNumberInput("input-jitter", 0.1),
-      keyDelayBaseMs: parseNumberInput("input-key-delay-ms", 12),
-    };
-    await request("setHumanization", payload);
-    logLine("Humanization updated");
-    await refreshState();
+  byId("btn-catalog-refresh").addEventListener("click", async () => {
+    await loadItemCatalog(true);
   });
 
   byId("btn-watch-add").addEventListener("click", async () => {
@@ -441,92 +554,190 @@ function wireActions() {
     logLine("Watch item added");
   });
 
-  byId("btn-run-watch-scan").addEventListener("click", async () => {
-    await request("runWatchlistScan", {
-      itemSpacingSeconds: parseNumberInput("input-item-spacing", 0.25),
-    });
-    logLine("Triggered watchlist scan");
+  byId("btn-start-category-fetch").addEventListener("click", openStartFetchFlow);
+  byId("btn-fetch-city-confirm").addEventListener("click", async () => {
+    const sel = byId("select-fetch-city");
+    const city = sel?.value?.trim() || "";
+    if (!city) {
+      logLine("Select a city.");
+      return;
+    }
+    localStorage.setItem(FETCH_CITY_STORAGE_KEY, city);
+    setFetchCityModalVisible(false);
+    await startCategoryFetchWithCity(city);
+  });
+  byId("btn-fetch-city-close").addEventListener("click", () => setFetchCityModalVisible(false));
+  byId("fetch-city-modal")?.addEventListener("click", (event) => {
+    if (event.target.id === "fetch-city-modal") {
+      setFetchCityModalVisible(false);
+    }
+  });
+  byId("btn-stop-category-fetch").addEventListener("click", async () => {
+    await window.botApi.stopCategoryScan();
+    logLine("Stop requested. Waiting for current item to finish.");
+  });
+  byId("btn-capture-search-point").addEventListener("click", async () => {
+    logLine("Pick mode: click the exact market search box point (Esc to cancel).");
+    const point = await request("selectPoint");
+    if (!point) {
+      logLine("Search point selection cancelled.");
+      return;
+    }
+    state.draftSearchPoint = point;
+    renderCalibrationDraftStatus();
+    logLine(`Search point picked (draft): ${point.x},${point.y}`);
+  });
+  byId("btn-save-search-point").addEventListener("click", async () => {
+    if (!state.draftSearchPoint) {
+      logLine("No pending Search Point to save.");
+      return;
+    }
+    await request("setSearchPoint", state.draftSearchPoint);
+    state.searchPoint = state.draftSearchPoint;
+    state.draftSearchPoint = null;
+    renderCalibrationStatus();
+    renderCalibrationDraftStatus();
+    logLine(`Search point saved: ${state.searchPoint.x},${state.searchPoint.y}`);
+  });
+  byId("btn-draw-price-region").addEventListener("click", async () => {
+    const region = await request("selectRegion");
+    if (!region) {
+      logLine("Price region selection cancelled.");
+      return;
+    }
+    state.draftRegion = region;
+    renderCalibrationDraftStatus();
+    logLine(`Price region drawn (draft): ${region.width}x${region.height}`);
+  });
+  byId("btn-save-price-region").addEventListener("click", async () => {
+    if (!state.draftRegion) {
+      logLine("No pending OCR region to save.");
+      return;
+    }
+    await request("setRegion", state.draftRegion);
+    state.region = state.draftRegion;
+    state.draftRegion = null;
+    renderCalibrationStatus();
+    renderCalibrationDraftStatus();
+    logLine(`Price region saved: ${state.region.width}x${state.region.height}`);
+  });
+  byId("btn-refresh-history").addEventListener("click", loadPriceHistory);
+  byId("btn-clear-live-rows").addEventListener("click", () => {
+    state.liveRows = [];
+    renderLiveRows();
   });
 
-  byId("btn-start-watch-loop").addEventListener("click", async () => {
-    await request("startWatchlistLoop", {
-      intervalSeconds: parseNumberInput("input-watch-interval", 2),
-      itemSpacingSeconds: parseNumberInput("input-item-spacing", 0.25),
-    });
-    logLine("Watchlist loop started");
+  byId("btn-help").addEventListener("click", () => {
+    const hidden = byId("help-modal").classList.contains("is-hidden");
+    setHelpVisible(hidden);
+  });
+  byId("btn-help-close").addEventListener("click", () => setHelpVisible(false));
+  byId("help-modal").addEventListener("click", (event) => {
+    if (event.target.id === "help-modal") {
+      setHelpVisible(false);
+    }
   });
 
-  byId("btn-stop-watch-loop").addEventListener("click", async () => {
-    await request("stopWatchlistLoop");
-    logLine("Watchlist loop stopped");
-  });
-
-  byId("btn-export-reco").addEventListener("click", async () => {
-    const exported = await request("exportRecommendationsCsv");
-    logLine(`Recommendations CSV path: ${exported.path}`);
-    await window.botApi.openRecommendationsFile();
+  document.addEventListener("keydown", (event) => {
+    if (!(event.ctrlKey && event.shiftKey)) return;
+    const key = event.key.toLowerCase();
+    if (key === "f") {
+      event.preventDefault();
+      openStartFetchFlow();
+    } else if (key === "s") {
+      event.preventDefault();
+      window.botApi.stopCategoryScan().then(() => {
+        logLine("Stop requested by shortcut.");
+      }).catch((error) => logLine(`Stop request failed: ${error.message}`));
+    } else if (key === "1") {
+      event.preventDefault();
+      setActiveTab("items");
+    } else if (key === "2") {
+      event.preventDefault();
+      setActiveTab("prices");
+    } else if (key === "h") {
+      event.preventDefault();
+      const hidden = byId("help-modal").classList.contains("is-hidden");
+      setHelpVisible(hidden);
+    }
   });
 }
 
 function wireEvents() {
   window.botApi.onEvent((message) => {
-    if (message.event === "result") {
-      const payload = message.payload;
-      state.latestValue = payload.value;
-      state.runtimeStatus = payload.runtimeStatus || state.runtimeStatus;
-      state.recentRows.unshift({
-        timestamp: payload.timestamp,
-        query: payload.queryText,
-        value: payload.value,
-        rawText: payload.rawText,
-      });
-      renderAll();
-      return;
-    }
-
-    if (message.event === "status") {
-      state.runtimeStatus = message.payload.runtimeStatus;
-      renderAll();
-      return;
-    }
-
     if (message.event === "watchlistChanged") {
       state.watchlist = message.payload.items || [];
-      renderAll();
+      renderWatchlist();
       return;
     }
-
-    if (message.event === "scanItemComplete") {
-      if (message.payload.opportunity) {
-        state.opportunities.unshift(message.payload.opportunity);
-      }
-      if (message.payload.scanResult) {
-        const scan = message.payload.scanResult;
-        state.recentRows.unshift({
-          timestamp: scan.timestamp,
-          query: scan.queryText,
-          value: scan.value,
-          rawText: scan.rawText,
-        });
-      }
-      renderAll();
+    if (message.event === "categoryScanStarted") {
+      const payload = message.payload || {};
+      const catId = payload.categoryId || "";
+      const catLabel = EXACT_CATEGORY_ORDER.find((c) => c.id === catId)?.label || catId;
+      state.isCategoryFetchRunning = true;
+      state.categoryProgress = {
+        done: 0,
+        total: payload.totalItems || 0,
+        failures: 0,
+        item: "",
+        category: catLabel,
+        city: payload.city || "",
+      };
+      renderCategoryProgress();
       return;
     }
-
-    if (message.event === "scanFinished") {
-      if (message.payload.stats) {
-        state.sessionStats = message.payload.stats;
+    if (message.event === "categoryScanItem") {
+      const payload = message.payload || {};
+      const scan = payload.scanResult || {};
+      state.liveRows.unshift({
+        timestamp: scan.timestamp,
+        city: payload.city || "",
+        category: payload.categoryId,
+        item_name: scan.queryText,
+        observed_price: scan.value,
+        confidence: scan.confidence,
+        error: scan.error || "",
+      });
+      state.categoryProgress = {
+        ...state.categoryProgress,
+        done: payload.index || state.categoryProgress.done,
+        total: payload.totalItems || state.categoryProgress.total,
+        failures: payload.failures || 0,
+        item: scan.queryText || "",
+        city: payload.city || state.categoryProgress.city,
+      };
+      renderLiveRows();
+      renderCategoryProgress();
+      const total = Number(payload.totalItems || 0);
+      const done = Number(payload.index || 0);
+      if (total > 0) {
+        window.botApi.setWindowProgress(Math.max(0, Math.min(1, done / total))).catch(() => {});
       }
-      renderAll();
-      logLine(`Watchlist scan finished. processed=${message.payload.processed} failures=${message.payload.failures}`);
       return;
     }
-
+    if (message.event === "categoryScanFinished") {
+      const payload = message.payload || {};
+      state.isCategoryFetchRunning = false;
+      state.categoryProgress = {
+        ...state.categoryProgress,
+        done: payload.processed || state.categoryProgress.done,
+        total: payload.processed || state.categoryProgress.total,
+        failures: payload.failures || state.categoryProgress.failures,
+        city: payload.city || state.categoryProgress.city,
+      };
+      renderCategoryProgress();
+      window.botApi.setWindowProgress(-1).catch(() => {});
+      window.botApi.restoreWindow().catch(() => {});
+      loadPriceHistory().catch(() => {});
+      logLine(
+        `Category fetch ${payload.cancelled ? "stopped" : "done"}: processed=${payload.processed ?? 0}, failures=${payload.failures ?? 0}`,
+      );
+      return;
+    }
     if (message.event === "log") {
       logLine(message.payload.message);
       return;
     }
-
     if (message.event === "backendExit") {
       setBackendStatus("Exited");
       logLine(`Backend exited code=${message.payload.code} signal=${message.payload.signal}`);
@@ -534,93 +745,22 @@ function wireEvents() {
   });
 }
 
-function wireShortcuts() {
-  document.addEventListener("keydown", (event) => {
-    const tag = event.target?.tagName?.toLowerCase();
-    if (tag === "input" || tag === "textarea" || tag === "select" || event.target?.isContentEditable) {
-      return;
-    }
-    if (!(event.ctrlKey && event.shiftKey)) {
-      return;
-    }
-
-    const key = event.key.toLowerCase();
-    if (key === "s") {
-      event.preventDefault();
-      performShortcutAction("captureSearchPoint");
-      return;
-    }
-
-    if (key === "r") {
-      event.preventDefault();
-      performShortcutAction("captureRegion");
-    }
-  });
-}
-
-function performShortcutAction(action) {
-  const actionMap = {
-    captureSearchPoint: () => {
-      setActivePage("check");
-      byId("btn-capture-search-point").click();
-      logLine("Shortcut: capture search point");
-    },
-    captureRegion: () => {
-      setActivePage("check");
-      byId("btn-select-region").click();
-      logLine("Shortcut: capture OCR region");
-    },
-    runQueryOnce: () => {
-      setActivePage("check");
-      byId("btn-run-once").click();
-      logLine("Shortcut: run query once");
-    },
-    runWatchlistScan: () => {
-      setActivePage("dashboard");
-      byId("btn-run-watch-scan").click();
-      logLine("Shortcut: run watchlist scan");
-    },
-    startWatchlistLoop: () => {
-      setActivePage("dashboard");
-      byId("btn-start-watch-loop").click();
-      logLine("Shortcut: start watchlist loop");
-    },
-    stopWatchlistLoop: () => {
-      setActivePage("dashboard");
-      byId("btn-stop-watch-loop").click();
-      logLine("Shortcut: stop watchlist loop");
-    },
-    refreshState: () => {
-      byId("btn-refresh-state").click();
-      logLine("Shortcut: refresh state");
-    },
-  };
-  const fn = actionMap[action];
-  if (fn) {
-    fn();
-  }
-}
-
-function wireGlobalShortcutBridge() {
-  window.botApi.onShortcut((payload) => {
-    if (!payload || !payload.action) {
-      return;
-    }
-    performShortcutAction(payload.action);
-  });
-}
-
 async function bootstrap() {
   setBackendStatus("Connected");
-  wireNavigation();
+  wireTabs();
   wireActions();
   wireEvents();
-  wireShortcuts();
-  wireGlobalShortcutBridge();
-  setActivePage("dashboard");
-  await refreshState();
+  renderCategorySelector();
+  renderFetchCityOptions();
+  renderCalibrationStatus();
+  renderCalibrationDraftStatus();
+  renderCategoryProgress();
+  await loadItemCatalog(false);
   await refreshWatchlist();
-  logLine("Dashboard ready");
+  await refreshCalibrationState();
+  await loadPriceHistory();
+  renderLiveRows();
+  logLine("Items console ready");
 }
 
 bootstrap().catch((error) => {
