@@ -34,6 +34,26 @@ python -m pip install --upgrade pip
 pip install -e .[dev]
 ```
 
+### Supabase/Postgres config (save fetch data)
+
+For local/dev runs, create a local env file in the project root:
+
+```powershell
+copy .env.example .env.local
+```
+
+For installed app releases, put `.env.local` in the app user data folder (persistent across updates):
+
+- `%APPDATA%\SoCaRi Market Bot\.env.local`
+
+Then edit `.env.local` and set at least:
+- `ALBION_BOT_DATABASE_URL`
+- `ALBION_DEFAULT_PRICE_CITY` (recommended)
+
+The backend auto-loads `.env.local` (then `.env`) from:
+1. `ALBION_BOT_ENV_DIR` (set by Electron to userData path)
+2. current working directory (fallback for dev)
+
 ## Setup (Electron UI)
 
 ```powershell

@@ -14,7 +14,7 @@ Requires-Dist: psycopg[binary]>=3.2
 Provides-Extra: dev
 Requires-Dist: pytest>=8.2.0; extra == "dev"
 
-# Albion Bot Foundation (Windows)
+# SoCaRi Market Bot Foundation (Windows)
 
 Desktop automation foundation for:
 - Transparent overlay
@@ -50,6 +50,26 @@ python -m pip install --upgrade pip
 pip install -e .[dev]
 ```
 
+### Supabase/Postgres config (save fetch data)
+
+For local/dev runs, create a local env file in the project root:
+
+```powershell
+copy .env.example .env.local
+```
+
+For installed app releases, put `.env.local` in the app user data folder (persistent across updates):
+
+- `%APPDATA%\SoCaRi Market Bot\.env.local`
+
+Then edit `.env.local` and set at least:
+- `ALBION_BOT_DATABASE_URL`
+- `ALBION_DEFAULT_PRICE_CITY` (recommended)
+
+The backend auto-loads `.env.local` (then `.env`) from:
+1. `ALBION_BOT_ENV_DIR` (set by Electron to userData path)
+2. current working directory (fallback for dev)
+
 ## Setup (Electron UI)
 
 ```powershell
@@ -73,10 +93,8 @@ albion-bot-service
 npm run electron:dev
 ```
 
-### One-click launcher (normal app-style)
-- Double-click `Start Albion Bot Dashboard.vbs` (hidden console), or
-- Double-click `Start Albion Bot Dashboard.bat` (shows startup logs).
-- Launcher auto-closes old bot/electron processes, ensures dependencies, then opens dashboard.
+### One-click launcher (app-style)
+- Double-click `Start Albion Bot Dashboard.vbs` to launch as a GUI app (no `cmd` window).
 
 ## Hotkeys (Default)
 

@@ -1,4 +1,5 @@
 const EXACT_CATEGORY_ORDER = [
+  { id: "all", label: "All Items" },
   { id: "weapons", label: "Weapons" },
   { id: "chest_armor", label: "Chest Armor" },
   { id: "head_armor", label: "Head Armor" },
@@ -56,6 +57,59 @@ function setProgress(done, total) {
 }
 
 let pausedLocal = false;
+let etaTimer = null;
+let scanMeta = {
+  startedAtMs: 0,
+  done: 0,
+  total: 0,
+  finished: false,
+};
+
+function clearEtaTimer() {
+  if (etaTimer) {
+    clearInterval(etaTimer);
+    etaTimer = null;
+  }
+}
+
+function formatDuration(totalSeconds) {
+  const sec = Math.max(0, Math.floor(totalSeconds));
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function renderEta() {
+  const node = $("eta-line");
+  if (!node) return;
+  if (scanMeta.finished || scanMeta.total <= 0) {
+    node.textContent = "ETA: --";
+    return;
+  }
+  if (scanMeta.done <= 0 || scanMeta.startedAtMs <= 0) {
+    node.textContent = "ETA: calculating...";
+    return;
+  }
+  const elapsedSec = Math.max(1, (Date.now() - scanMeta.startedAtMs) / 1000);
+  const avgSecPerItem = elapsedSec / Math.max(1, scanMeta.done);
+  const remainingItems = Math.max(0, scanMeta.total - scanMeta.done);
+  const remainingSec = Math.max(0, Math.round(remainingItems * avgSecPerItem));
+  const finishAt = new Date(Date.now() + remainingSec * 1000);
+  const finishPh = finishAt.toLocaleString("en-PH", {
+    timeZone: "Asia/Manila",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+  });
+  node.textContent = `ETA: ${formatDuration(remainingSec)} · PH Time: ${finishPh}`;
+}
 
 function setPausedUi(paused) {
   pausedLocal = Boolean(paused);
@@ -82,6 +136,15 @@ function applyBotMessage(msg) {
     setProgress(0, payload.totalItems || 0);
     $("current-line").textContent = "> Starting…";
     $("current-price").textContent = "Price: --";
+    scanMeta = {
+      startedAtMs: payload.startedAt ? new Date(payload.startedAt).getTime() || Date.now() : Date.now(),
+      done: 0,
+      total: Number(payload.totalItems || 0),
+      finished: false,
+    };
+    renderEta();
+    clearEtaTimer();
+    etaTimer = setInterval(renderEta, 1000);
     setPausedUi(false);
     return;
   }
@@ -89,10 +152,14 @@ function applyBotMessage(msg) {
   if (ev === "categoryScanItem") {
     const total = Number(payload.totalItems || 0);
     const idx = Number(payload.index || 0);
+    scanMeta.done = idx;
+    scanMeta.total = total;
+    scanMeta.finished = false;
     setProgress(idx, total);
     const scan = payload.scanResult || {};
     $("current-line").textContent = formatItemLine(payload.item, scan);
     $("current-price").textContent = `Price: ${formatPrice(scan.value)}`;
+    renderEta();
     return;
   }
 
@@ -100,6 +167,9 @@ function applyBotMessage(msg) {
     setProgress(payload.processed || 0, payload.processed || 0);
     $("current-line").textContent = payload.cancelled ? "> Stopped" : "> Complete";
     $("current-price").textContent = "Price: --";
+    scanMeta.finished = true;
+    renderEta();
+    clearEtaTimer();
     return;
   }
 
@@ -148,5 +218,6 @@ window.addEventListener("DOMContentLoaded", () => {
   const off = window.statusApi.onBotEvent(applyBotMessage);
   window.addEventListener("beforeunload", () => {
     if (typeof off === "function") off();
+    clearEtaTimer();
   });
 });

@@ -2,8 +2,15 @@
 const MARKET_CITIES = ["Bridgewatch", "Martlock", "Thetford", "Fort Sterling", "Lymhurst", "Caerleon", "Brecilien"];
 const FETCH_CITY_STORAGE_KEY = "albionMarketFetchCity";
 const UI_PREFS_KEY = "albionUiPrefs";
+const DB_READ_SCHEDULE_UTC_HOURS = [0, 6, 12, 18]; // Albion UTC time slots
+const AUTO_POST_BATCH_SIZE = 10;
+const AUTO_POST_IDLE_MS = 10000;
+const MARKET_REVIEW_STATE_KEY = "albionMarketReviewState";
+const MARKET_FILTER_DEBOUNCE_MS = 220;
+const MARKET_DB_FETCH_LIMIT = 2000;
 
 const EXACT_CATEGORY_ORDER = [
+  { id: "all", label: "All Items" },
   { id: "weapons", label: "Weapons" },
   { id: "chest_armor", label: "Chest Armor" },
   { id: "head_armor", label: "Head Armor" },
@@ -36,10 +43,25 @@ const state = {
   region: null,
   marketPriceRows: [],
   marketRowCounter: 0,
+  isPostingMarketRows: false,
+  resumeCheckpoint: null,
+  marketDbRows: [],
+  marketDbFilters: {
+    search: "",
+    category: "",
+    type: "",
+    tier: "",
+    enchant: "",
+    city: "",
+    sort: "last_updated_desc",
+  },
 };
 
 const CATALOG_RENDER_CAP = 400;
 let catalogFilterDebounce = null;
+let autoPostIdleTimer = null;
+let marketFilterDebounce = null;
+let dbReadScheduleTimer = null;
 
 function byId(id) {
   return document.getElementById(id);
@@ -63,8 +85,42 @@ function toNumber(value, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function normalizeDisplayPrice(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return n > 1 ? Math.round(n) : 0;
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function msUntilNextUtcReadSlot(now = new Date()) {
+  const y = now.getUTCFullYear();
+  const m = now.getUTCMonth();
+  const d = now.getUTCDate();
+  for (const hour of DB_READ_SCHEDULE_UTC_HOURS) {
+    const candidate = Date.UTC(y, m, d, hour, 0, 0, 0);
+    if (candidate > now.getTime()) {
+      return candidate - now.getTime();
+    }
+  }
+  const tomorrowFirst = Date.UTC(y, m, d + 1, DB_READ_SCHEDULE_UTC_HOURS[0], 0, 0, 0);
+  return tomorrowFirst - now.getTime();
+}
+
+function scheduleNextDbReadTick() {
+  if (dbReadScheduleTimer) {
+    clearTimeout(dbReadScheduleTimer);
+  }
+  const waitMs = Math.max(1000, msUntilNextUtcReadSlot(new Date()));
+  dbReadScheduleTimer = setTimeout(() => {
+    loadPriceHistory().catch(() => {});
+    if (state.activeView === "market-price") {
+      loadMarketPriceRows().catch(() => {});
+    }
+    scheduleNextDbReadTick();
+  }, waitMs);
 }
 
 function setBackendStatus(text) {
@@ -96,6 +152,11 @@ function setActiveView(view) {
   document.querySelectorAll(".view-panel").forEach((panel) => {
     panel.classList.toggle("is-active", panel.dataset.view === view);
   });
+  if (view === "market-price") {
+    loadMarketPriceRows().catch((error) => {
+      logLine(`Market DB load failed: ${error.message}`);
+    });
+  }
 }
 
 function setHelpVisible(visible) {
@@ -163,6 +224,11 @@ function renderCategorySelector() {
   const select = byId("select-fetch-category");
   if (!select) return;
   const counts = new Map((state.itemCatalog?.exactCategories || []).map((c) => [c.id, c.count]));
+  const allCount = (state.itemCatalog?.categories || []).reduce(
+    (acc, section) => acc + ((section.items && section.items.length) || 0),
+    0,
+  );
+  counts.set("all", allCount);
   const previous = select.value;
   select.innerHTML = "";
   for (const c of EXACT_CATEGORY_ORDER) {
@@ -193,6 +259,80 @@ function renderCategoryProgress() {
     return;
   }
   node.textContent = `Scan: Running ${progress.done}/${progress.total}${progress.failures ? ` · Fail ${progress.failures}` : ""}${progress.city ? ` · ${progress.city}` : ""}`;
+}
+
+function saveMarketReviewState() {
+  try {
+    const payload = {
+      rows: state.marketPriceRows,
+      marketRowCounter: state.marketRowCounter,
+      selectedCity: state.selectedCity || "",
+      savedAt: new Date().toISOString(),
+    };
+    localStorage.setItem(MARKET_REVIEW_STATE_KEY, JSON.stringify(payload));
+  } catch (_error) {
+    // ignore localStorage write failures
+  }
+}
+
+function restoreMarketReviewState() {
+  try {
+    const raw = localStorage.getItem(MARKET_REVIEW_STATE_KEY);
+    if (!raw) return;
+    const payload = JSON.parse(raw);
+    const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+    state.marketPriceRows = rows
+      .filter((row) => row && typeof row === "object" && row.id)
+      .map((row) => ({
+        ...row,
+        status: String(row.status || "pending"),
+        statusLabel: String(row.statusLabel || "Pending"),
+      }));
+    state.marketRowCounter = Number.isFinite(Number(payload?.marketRowCounter))
+      ? Math.max(0, Number(payload.marketRowCounter))
+      : state.marketPriceRows.length;
+    if (!state.selectedCity && payload?.selectedCity) {
+      state.selectedCity = String(payload.selectedCity);
+    }
+  } catch (_error) {
+    // ignore corrupted persisted review state
+  }
+}
+
+function renderResumeCheckpointState() {
+  const statusNode = byId("resume-scan-status");
+  const resumeBtn = byId("btn-resume-last-scan");
+  const discardBtn = byId("btn-discard-last-scan");
+  const cp = state.resumeCheckpoint;
+  const running = state.isCategoryFetchRunning;
+  if (resumeBtn) resumeBtn.disabled = running || !cp?.resumable;
+  if (discardBtn) discardBtn.disabled = running || !cp?.hasCheckpoint;
+  if (!statusNode) return;
+  if (!cp?.hasCheckpoint) {
+    statusNode.textContent = "Resume: No saved progress";
+    return;
+  }
+  if (cp.invalid) {
+    statusNode.textContent = `Resume: Saved progress invalid (${cp.reason || "unknown"})`;
+    return;
+  }
+  if (cp.completed) {
+    statusNode.textContent = `Resume: Last scan completed (${cp.processed}/${cp.totalItems})`;
+    return;
+  }
+  statusNode.textContent =
+    `Resume: ${cp.categoryId || "-"} @ ${cp.city || "-"} ` +
+    `(${cp.nextIndex || 0}/${cp.totalItems || 0})`;
+}
+
+async function refreshResumeCheckpointState() {
+  try {
+    const payload = await request("getResumeScanCheckpoint");
+    state.resumeCheckpoint = payload || { hasCheckpoint: false };
+  } catch (error) {
+    state.resumeCheckpoint = { hasCheckpoint: false, invalid: true, reason: error.message };
+  }
+  renderResumeCheckpointState();
 }
 
 function renderCalibrationStatus() {
@@ -252,7 +392,7 @@ function renderWatchlist() {
 function renderDashboardStats() {
   const values = state.historyRows
     .concat(state.liveRows)
-    .map((r) => toNumber(r.observed_price ?? r.value, 0))
+    .map((r) => normalizeDisplayPrice(r.observed_price ?? r.value))
     .filter((n) => n > 0);
   const totalRevenue = values.reduce((acc, n) => acc + n, 0);
   const itemCount = state.liveRows.length;
@@ -275,12 +415,16 @@ function renderDashboardStats() {
     const topCity = [...cityCount.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || "--";
     const bestRow = state.liveRows
       .filter((r) => !r.error && Number.isFinite(Number(r.observed_price ?? r.value)))
-      .sort((a, b) => Number(a.observed_price ?? a.value) - Number(b.observed_price ?? b.value))[0];
+      .sort(
+        (a, b) =>
+          normalizeDisplayPrice(a.observed_price ?? a.value) -
+          normalizeDisplayPrice(b.observed_price ?? b.value),
+      )[0];
 
     byId("metric-top-item").textContent = topItem;
     byId("metric-top-city").textContent = topCity;
     byId("metric-best-item").textContent = bestRow
-      ? `${bestRow.item_name || bestRow.queryText} @ ${bestRow.observed_price ?? bestRow.value}`
+      ? `${bestRow.item_name || bestRow.queryText} @ ${normalizeDisplayPrice(bestRow.observed_price ?? bestRow.value)}`
       : "--";
   } else {
     byId("metric-top-item").textContent = "--";
@@ -300,7 +444,7 @@ function renderLiveRows() {
       <td>${row.city || "-"}</td>
       <td>${row.category || "-"}</td>
       <td>${row.item_name || row.queryText || "-"}</td>
-      <td>${row.observed_price ?? row.value ?? "--"}</td>
+      <td>${normalizeDisplayPrice(row.observed_price ?? row.value)}</td>
     `;
       body.appendChild(tr);
     }
@@ -315,7 +459,7 @@ function renderLiveRows() {
       <td>${formatRowTime(row.timestamp)}</td>
       <td>${row.city || "-"}</td>
       <td>${row.item_name || row.queryText || "-"}</td>
-      <td>${row.observed_price ?? row.value ?? "--"}</td>
+      <td>${normalizeDisplayPrice(row.observed_price ?? row.value)}</td>
       <td>${row.error || ""}</td>
     `;
       dashBody.appendChild(tr);
@@ -338,7 +482,7 @@ function renderHistoryRows() {
       <td>${row.city || "-"}</td>
       <td>${row.category || "-"}</td>
       <td>${row.item_name || "-"}</td>
-      <td>${row.observed_price ?? "--"}</td>
+      <td>${normalizeDisplayPrice(row.observed_price)}</td>
       <td>${row.tier ?? "-"}</td>
       <td>${row.enchant ?? "-"}</td>
       <td>${row.error || ""}</td>
@@ -351,7 +495,7 @@ function renderHistoryRows() {
 function marketRowStatusClass(row) {
   if (row.status === "posted") return "posted";
   if (row.status === "failed") return "failed";
-  if (!Number.isFinite(Number(row.finalPrice)) || Number(row.finalPrice) <= 0) return "invalid";
+  if (!Number.isFinite(Number(row.finalPrice)) || Number(row.finalPrice) < 0) return "invalid";
   return "pending";
 }
 
@@ -361,69 +505,180 @@ function renderMarketPriceSummary() {
   const total = state.marketPriceRows.length;
   const posted = state.marketPriceRows.filter((row) => row.status === "posted").length;
   const failed = state.marketPriceRows.filter((row) => row.status === "failed").length;
-  const pending = total - posted - failed;
+  const invalid = state.marketPriceRows.filter((row) => marketRowStatusClass(row) === "invalid").length;
+  const pending = state.marketPriceRows.filter((row) => marketRowStatusClass(row) === "pending").length;
   if (total === 0) {
     node.textContent = "No rows yet.";
     return;
   }
-  node.textContent = `Rows: ${total} · Pending: ${pending} · Posted: ${posted} · Failed: ${failed}`;
+  node.textContent = `Rows: ${total} · Pending: ${pending} · Posted: ${posted} · Failed: ${failed} · Invalid: ${invalid}`;
+}
+
+function clearAutoPostIdleTimer() {
+  if (autoPostIdleTimer) {
+    clearTimeout(autoPostIdleTimer);
+    autoPostIdleTimer = null;
+  }
+}
+
+function collectRowsForPost({ auto = false } = {}) {
+  const rowsToPost = [];
+  const blocked = [];
+  for (const row of state.marketPriceRows) {
+    if (row.status === "posted") continue;
+    if (auto && row.status !== "pending") continue;
+    const numericPrice = Number(row.finalPrice);
+    if (!row.item_id) {
+      blocked.push({ rowId: row.id, reason: "Missing item id" });
+      continue;
+    }
+    if (!row.city) {
+      blocked.push({ rowId: row.id, reason: "Missing city" });
+      continue;
+    }
+    if (!Number.isFinite(numericPrice) || numericPrice < 0) {
+      blocked.push({ rowId: row.id, reason: "Invalid price" });
+      continue;
+    }
+    // Auto-post skips OCR miss/zero rows by request.
+    if (auto && numericPrice === 0) {
+      continue;
+    }
+    rowsToPost.push(row);
+  }
+  return { rowsToPost, blocked };
+}
+
+async function postMarketRows({ auto = false } = {}) {
+  clearAutoPostIdleTimer();
+  if (state.isPostingMarketRows) return { posted: 0, failed: 0, skipped: true };
+
+  const { rowsToPost, blocked } = collectRowsForPost({ auto });
+  if (!auto && blocked.length) {
+    const blockedById = new Map(blocked.map((x) => [x.rowId, x.reason]));
+    state.marketPriceRows = state.marketPriceRows.map((row) => {
+      const reason = blockedById.get(row.id);
+      if (!reason || row.status === "posted") return row;
+      return { ...row, status: "failed", statusLabel: `Failed: ${reason}` };
+    });
+    renderMarketPriceRows();
+  }
+  if (rowsToPost.length === 0) {
+    if (!auto) logLine("No postable rows. Check Post Status reasons.");
+    return { posted: 0, failed: 0, skipped: false };
+  }
+
+  logLine(`${auto ? "Auto-posting" : "Posting"} ${rowsToPost.length} reviewed rows to Supabase...`);
+  const payload = rowsToPost.map((row) => ({
+    rowId: row.id,
+    itemUniqueName: row.item_id,
+    itemName: row.item_name || row.item_id,
+    tier: row.tier,
+    enchant: row.enchant || 0,
+    city: row.city,
+    price: Number(row.finalPrice),
+    postedAt: row.timestamp,
+  }));
+
+  state.isPostingMarketRows = true;
+  try {
+    const response = await request("postReviewedPrices", { rows: payload });
+    const byIdMap = new Map((response.results || []).map((result) => [result.rowId, result]));
+    state.marketPriceRows = state.marketPriceRows.map((row) => {
+      const result = byIdMap.get(row.id);
+      if (!result) return row;
+      if (result.ok) {
+        return { ...row, status: "posted", statusLabel: "Posted" };
+      }
+      return { ...row, status: "failed", statusLabel: `Failed: ${result.error || "unknown"}` };
+    });
+    renderMarketPriceRows();
+    logLine(`Supabase post complete. OK=${response.posted || 0}, Failed=${response.failed || 0}`);
+    return { posted: response.posted || 0, failed: response.failed || 0, skipped: false };
+  } catch (error) {
+    logLine(`Supabase post failed: ${error.message}`);
+    return { posted: 0, failed: rowsToPost.length, skipped: false };
+  } finally {
+    state.isPostingMarketRows = false;
+  }
+}
+
+function scheduleAutoPostIdleFlush() {
+  clearAutoPostIdleTimer();
+  autoPostIdleTimer = setTimeout(() => {
+    postMarketRows({ auto: true }).catch((error) => {
+      logLine(`Auto-post idle flush failed: ${error.message}`);
+    });
+  }, AUTO_POST_IDLE_MS);
 }
 
 function renderMarketPriceRows() {
   const body = byId("market-price-body");
-  if (!body) return;
+  if (!body) {
+    saveMarketReviewState();
+    return;
+  }
   body.innerHTML = "";
   for (const row of state.marketPriceRows) {
-    const tr = document.createElement("tr");
     const statusClass = marketRowStatusClass(row);
+    const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td>${formatRowTime(row.timestamp)}</td>
-      <td>${row.city || "-"}</td>
       <td>${row.category || "-"}</td>
       <td>${row.item_name || row.queryText || "-"}</td>
       <td>${row.tier ?? "-"}</td>
       <td>${row.enchant ?? 0}</td>
-      <td>${row.ocrPrice ?? "--"}</td>
       <td>
         <input
           class="price-input"
           type="number"
-          min="1"
+          min="0"
           step="1"
           value="${row.finalPrice ?? ""}"
           data-action="edit-final"
           data-row-id="${row.id}"
         />
       </td>
+      <td>${row.city || "-"}</td>
       <td><span class="status-badge ${statusClass}">${row.statusLabel || row.status || "pending"}</span></td>
-      <td class="row-actions">
-        <button class="btn-secondary" data-action="revert-row" data-row-id="${row.id}">Revert</button>
-        <button class="btn-danger" data-action="delete-row" data-row-id="${row.id}">Delete</button>
-      </td>
+      <td>${formatRowTime(row.timestamp)}</td>
     `;
     body.appendChild(tr);
   }
   renderMarketPriceSummary();
+  saveMarketReviewState();
 }
 
 function appendMarketReviewRowFromScan(payload, scan) {
+  const rawScanValue = Number(scan.value);
+  // OCR noise can produce tiny false positives (e.g. 1). Treat them as undetected.
+  const normalizedPrice = Number.isFinite(rawScanValue) && rawScanValue > 1 ? Math.round(rawScanValue) : 0;
+  const displayItemName = String(payload.item?.name || "").trim() || String(scan.queryText || "").replace(/\s+\d+\.\d+\s*$/, "");
   const row = {
     id: `mpr-${Date.now()}-${++state.marketRowCounter}`,
     timestamp: scan.timestamp,
     city: payload.city || "",
     category: payload.categoryId || "",
-    item_name: scan.queryText || payload.item?.name || "",
+    item_name: displayItemName,
     item_id: payload.item?.id || "",
     tier: payload.item?.tier ?? null,
     enchant: payload.item?.enchant ?? 0,
-    ocrPrice: scan.value ?? null,
-    finalPrice: scan.value ?? null,
+    ocrPrice: normalizedPrice,
+    finalPrice: normalizedPrice,
     error: scan.error || "",
     status: "pending",
-    statusLabel: scan.error ? "Failed OCR" : "Pending",
+    statusLabel: normalizedPrice > 0 ? "Pending" : "No OCR (0)",
   };
   state.marketPriceRows.unshift(row);
   renderMarketPriceRows();
+  const postableNow = collectRowsForPost({ auto: true }).rowsToPost.length;
+  if (postableNow >= AUTO_POST_BATCH_SIZE) {
+    clearAutoPostIdleTimer();
+    postMarketRows({ auto: true }).catch((error) => {
+      logLine(`Auto-post batch failed: ${error.message}`);
+    });
+  } else {
+    scheduleAutoPostIdleFlush();
+  }
 }
 
 async function refreshWatchlist() {
@@ -546,6 +801,9 @@ function renderCatalogAccordion() {
 function collectItemsForCategory(categoryId) {
   if (!state.itemCatalog?.categories) return [];
   const allItems = state.itemCatalog.categories.flatMap((section) => section.items || []);
+  if (categoryId === "all") {
+    return allItems.map((item) => ({ id: item.id, name: item.name, tier: item.tier, enchant: item.enchant }));
+  }
   const inferCategoryFromId = (id = "") => {
     const u = String(id).toUpperCase();
     if (u.includes("ARTEFACT") || u.includes("ARTIFACT") || u.includes("_RUNE") || u.includes("_SOUL") || u.includes("_RELIC")) return "artifact";
@@ -577,6 +835,81 @@ async function loadPriceHistory() {
   } catch (error) {
     logLine(`History load failed: ${error.message}`);
   }
+}
+
+function renderMarketDbSummary() {
+  const node = byId("market-db-summary");
+  if (!node) return;
+  const total = state.marketDbRows.length;
+  if (total === 0) {
+    node.textContent = "No rows found for current filters.";
+    return;
+  }
+  node.textContent = `Rows: ${total} · Source: bot database`;
+}
+
+function repopulateFilterSelect(id, values, allLabel, selectedValue = "") {
+  const sel = byId(id);
+  if (!sel) return;
+  const prev = selectedValue || sel.value || "";
+  sel.innerHTML = "";
+  const base = document.createElement("option");
+  base.value = "";
+  base.textContent = allLabel;
+  sel.appendChild(base);
+  for (const value of values) {
+    const opt = document.createElement("option");
+    opt.value = String(value);
+    opt.textContent = String(value);
+    sel.appendChild(opt);
+  }
+  sel.value = [...sel.options].some((o) => o.value === prev) ? prev : "";
+}
+
+function renderMarketDbRows() {
+  const body = byId("market-db-body");
+  if (!body) return;
+  body.innerHTML = "";
+  for (const row of state.marketDbRows) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${row.item || "-"}</td>
+      <td>${row.tier ?? "-"}</td>
+      <td>${row.enchant ?? 0}</td>
+      <td>${row.city || "-"}</td>
+      <td>${row.category || "-"}</td>
+      <td>${row.type || "-"}</td>
+      <td>${row.quality || "-"}</td>
+      <td class="price-cell">${normalizeDisplayPrice(row.price)}</td>
+      <td>${formatRowTime(row.last_updated)}</td>
+    `;
+    body.appendChild(tr);
+  }
+  renderMarketDbSummary();
+}
+
+async function loadMarketPriceRows() {
+  const payload = {
+    search: state.marketDbFilters.search || "",
+    category: state.marketDbFilters.category || "",
+    type: state.marketDbFilters.type || "",
+    tier: state.marketDbFilters.tier || "",
+    enchant: state.marketDbFilters.enchant || "",
+    city: state.marketDbFilters.city || "",
+    sort: state.marketDbFilters.sort || "last_updated_desc",
+    limit: MARKET_DB_FETCH_LIMIT,
+    offset: 0,
+    botOnly: true,
+  };
+  const res = await request("getMarketPriceRows", payload);
+  state.marketDbRows = Array.isArray(res?.rows) ? res.rows : [];
+  const f = res?.filters || {};
+  repopulateFilterSelect("market-filter-category", f.categories || [], "All Categories", state.marketDbFilters.category);
+  repopulateFilterSelect("market-filter-type", f.types || [], "All Types", state.marketDbFilters.type);
+  repopulateFilterSelect("market-filter-tier", f.tiers || [], "All Tiers", state.marketDbFilters.tier);
+  repopulateFilterSelect("market-filter-enchant", f.enchants || [], "All Enchants", state.marketDbFilters.enchant);
+  repopulateFilterSelect("market-filter-city", f.cities || [], "All Regions", state.marketDbFilters.city);
+  renderMarketDbRows();
 }
 
 function openStartFetchFlow() {
@@ -635,6 +968,7 @@ async function startCategoryFetchWithCity(city) {
   try {
     logLine("Electron minimized. Keep Albion market window focused.");
     await window.botApi.runCategoryScan(categoryId, items, marketCity);
+    await refreshResumeCheckpointState();
     logLine("Category fetch started.");
   } catch (error) {
     logLine(`Category fetch failed: ${error.message}`);
@@ -754,6 +1088,31 @@ function wireActions() {
     await window.botApi.stopCategoryScan();
     logLine("Stop requested. Waiting for current item to finish.");
   });
+  byId("btn-resume-last-scan")?.addEventListener("click", async () => {
+    if (state.isCategoryFetchRunning) return;
+    try {
+      const response = await request("resumeCategoryScanFromCheckpoint");
+      if (response?.running) {
+        logLine("Resuming saved category scan...");
+      } else {
+        logLine("No resumable scan found.");
+      }
+      await refreshResumeCheckpointState();
+    } catch (error) {
+      logLine(`Resume failed: ${error.message}`);
+      await refreshResumeCheckpointState();
+    }
+  });
+  byId("btn-discard-last-scan")?.addEventListener("click", async () => {
+    if (state.isCategoryFetchRunning) return;
+    try {
+      await request("clearCategoryScanCheckpoint");
+      logLine("Saved scan checkpoint discarded.");
+    } catch (error) {
+      logLine(`Discard failed: ${error.message}`);
+    }
+    await refreshResumeCheckpointState();
+  });
 
   byId("btn-capture-search-point")?.addEventListener("click", async () => {
     logLine("Pick mode: click the exact market search box point (Esc to cancel).");
@@ -785,88 +1144,50 @@ function wireActions() {
     renderLiveRows();
   });
 
-  byId("market-price-body")?.addEventListener("input", (event) => {
+  byId("market-filter-search")?.addEventListener("input", (event) => {
     const target = event.target;
     if (!(target instanceof HTMLInputElement)) return;
-    if (target.dataset.action !== "edit-final") return;
-    const row = state.marketPriceRows.find((entry) => entry.id === target.dataset.rowId);
-    if (!row) return;
-    const price = Number(target.value);
-    row.finalPrice = Number.isFinite(price) ? Math.round(price) : null;
-    if (row.status !== "posted") {
-      row.status = "pending";
-      row.statusLabel = Number.isFinite(row.finalPrice) && row.finalPrice > 0 ? "Pending" : "Invalid Price";
-    }
-    renderMarketPriceRows();
+    state.marketDbFilters.search = target.value || "";
+    clearTimeout(marketFilterDebounce);
+    marketFilterDebounce = setTimeout(() => {
+      loadMarketPriceRows().catch((error) => logLine(`Market DB load failed: ${error.message}`));
+    }, MARKET_FILTER_DEBOUNCE_MS);
   });
-
-  byId("market-price-body")?.addEventListener("click", (event) => {
+  byId("market-filter-category")?.addEventListener("change", (event) => {
     const target = event.target;
-    if (!(target instanceof HTMLElement)) return;
-    const action = target.dataset.action;
-    const rowId = target.dataset.rowId;
-    if (!action || !rowId) return;
-    const row = state.marketPriceRows.find((entry) => entry.id === rowId);
-    if (!row) return;
-    if (action === "revert-row") {
-      row.finalPrice = row.ocrPrice;
-      if (row.status !== "posted") {
-        row.status = "pending";
-        row.statusLabel = Number.isFinite(Number(row.finalPrice)) && Number(row.finalPrice) > 0
-          ? "Pending"
-          : "Invalid Price";
-      }
-      renderMarketPriceRows();
-      return;
-    }
-    if (action === "delete-row") {
-      state.marketPriceRows = state.marketPriceRows.filter((entry) => entry.id !== rowId);
-      renderMarketPriceRows();
-    }
+    if (!(target instanceof HTMLSelectElement)) return;
+    state.marketDbFilters.category = target.value || "";
+    loadMarketPriceRows().catch((error) => logLine(`Market DB load failed: ${error.message}`));
   });
-
-  byId("btn-market-clear-posted")?.addEventListener("click", () => {
-    state.marketPriceRows = state.marketPriceRows.filter((row) => row.status !== "posted");
-    renderMarketPriceRows();
-    logLine("Cleared posted market review rows.");
+  byId("market-filter-type")?.addEventListener("change", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLSelectElement)) return;
+    state.marketDbFilters.type = target.value || "";
+    loadMarketPriceRows().catch((error) => logLine(`Market DB load failed: ${error.message}`));
   });
-
-  byId("btn-market-post-all")?.addEventListener("click", async () => {
-    const rowsToPost = state.marketPriceRows.filter((row) => {
-      const validPrice = Number.isFinite(Number(row.finalPrice)) && Number(row.finalPrice) > 0;
-      return row.status !== "posted" && validPrice && row.item_id && row.city;
-    });
-    if (rowsToPost.length === 0) {
-      logLine("No valid pending rows to post.");
-      return;
-    }
-    logLine(`Posting ${rowsToPost.length} reviewed rows to Supabase...`);
-    const payload = rowsToPost.map((row) => ({
-      rowId: row.id,
-      itemUniqueName: row.item_id,
-      itemName: row.item_name || row.item_id,
-      tier: row.tier,
-      enchant: row.enchant || 0,
-      city: row.city,
-      price: Number(row.finalPrice),
-      postedAt: row.timestamp,
-    }));
-    try {
-      const response = await request("postReviewedPrices", { rows: payload });
-      const byIdMap = new Map((response.results || []).map((result) => [result.rowId, result]));
-      state.marketPriceRows = state.marketPriceRows.map((row) => {
-        const result = byIdMap.get(row.id);
-        if (!result) return row;
-        if (result.ok) {
-          return { ...row, status: "posted", statusLabel: "Posted" };
-        }
-        return { ...row, status: "failed", statusLabel: `Failed: ${result.error || "unknown"}` };
-      });
-      renderMarketPriceRows();
-      logLine(`Supabase post complete. OK=${response.posted || 0}, Failed=${response.failed || 0}`);
-    } catch (error) {
-      logLine(`Supabase post failed: ${error.message}`);
-    }
+  byId("market-filter-tier")?.addEventListener("change", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLSelectElement)) return;
+    state.marketDbFilters.tier = target.value || "";
+    loadMarketPriceRows().catch((error) => logLine(`Market DB load failed: ${error.message}`));
+  });
+  byId("market-filter-enchant")?.addEventListener("change", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLSelectElement)) return;
+    state.marketDbFilters.enchant = target.value || "";
+    loadMarketPriceRows().catch((error) => logLine(`Market DB load failed: ${error.message}`));
+  });
+  byId("market-filter-city")?.addEventListener("change", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLSelectElement)) return;
+    state.marketDbFilters.city = target.value || "";
+    loadMarketPriceRows().catch((error) => logLine(`Market DB load failed: ${error.message}`));
+  });
+  byId("market-filter-sort")?.addEventListener("change", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLSelectElement)) return;
+    state.marketDbFilters.sort = target.value || "last_updated_desc";
+    loadMarketPriceRows().catch((error) => logLine(`Market DB load failed: ${error.message}`));
   });
 
   byId("btn-help")?.addEventListener("click", () => {
@@ -884,8 +1205,32 @@ function wireActions() {
   byId("btn-reset-settings")?.addEventListener("click", resetUiPrefs);
 
   document.addEventListener("keydown", (event) => {
-    if (!(event.ctrlKey && event.shiftKey)) return;
     const key = event.key.toLowerCase();
+    // Local fallback for scan hotkeys when global shortcuts are blocked by OS/game focus rules.
+    if (!event.ctrlKey && !event.shiftKey && !event.altKey && !event.metaKey) {
+      if (key === "f1") {
+        event.preventDefault();
+        window.botApi.scanControl("togglePause")
+          .then((res) => logLine(`Scan ${res?.paused ? "paused" : "resumed"} (F1).`))
+          .catch((error) => logLine(`F1 failed: ${error.message}`));
+        return;
+      }
+      if (key === "f2") {
+        event.preventDefault();
+        window.botApi.scanControl("skip")
+          .then(() => logLine("Skipped current delay (F2)."))
+          .catch((error) => logLine(`F2 failed: ${error.message}`));
+        return;
+      }
+      if (key === "f5") {
+        event.preventDefault();
+        window.botApi.scanControl("stop")
+          .then(() => logLine("Stop requested (F5)."))
+          .catch((error) => logLine(`F5 failed: ${error.message}`));
+        return;
+      }
+    }
+    if (!(event.ctrlKey && event.shiftKey)) return;
     if (key === "f") {
       event.preventDefault();
       setActiveView("check");
@@ -933,17 +1278,22 @@ function wireEvents() {
         city: payload.city || "",
       };
       renderCategoryProgress();
+      renderResumeCheckpointState();
       return;
     }
     if (message.event === "categoryScanItem") {
       const payload = message.payload || {};
       const scan = payload.scanResult || {};
+      const rawScanValue = Number(scan.value);
+      const normalizedScanValue =
+        Number.isFinite(rawScanValue) && rawScanValue > 1 ? Math.round(rawScanValue) : 0;
+      const displayItemName = String(payload.item?.name || "").trim() || String(scan.queryText || "").replace(/\s+\d+\.\d+\s*$/, "");
       state.liveRows.unshift({
         timestamp: scan.timestamp,
         city: payload.city || "",
         category: payload.categoryId,
-        item_name: scan.queryText,
-        observed_price: scan.value,
+        item_name: displayItemName,
+        observed_price: normalizedScanValue,
         confidence: scan.confidence,
         error: scan.error || "",
       });
@@ -980,6 +1330,8 @@ function wireEvents() {
       window.botApi.restoreWindow().catch(() => {});
       window.botApi.closeStatusWindow().catch(() => {});
       loadPriceHistory().catch(() => {});
+      loadMarketPriceRows().catch(() => {});
+      refreshResumeCheckpointState().catch(() => {});
       logLine(
         `Category fetch ${payload.cancelled ? "stopped" : "done"}: processed=${payload.processed ?? 0}, failures=${payload.failures ?? 0}`,
       );
@@ -1011,6 +1363,11 @@ async function bootstrap() {
   loadUiPrefs();
   renderCategorySelector();
   renderFetchCityOptions();
+  restoreMarketReviewState();
+  const marketSearchInput = byId("market-filter-search");
+  if (marketSearchInput) marketSearchInput.value = state.marketDbFilters.search;
+  const marketSortSelect = byId("market-filter-sort");
+  if (marketSortSelect) marketSortSelect.value = state.marketDbFilters.sort || "last_updated_desc";
   setSelectedCity(localStorage.getItem(FETCH_CITY_STORAGE_KEY) || MARKET_CITIES[0]);
   renderCityChips();
   renderCalibrationStatus();
@@ -1019,8 +1376,15 @@ async function bootstrap() {
   await refreshWatchlist();
   await refreshCalibrationState();
   await loadPriceHistory();
+  await refreshResumeCheckpointState();
+  scheduleNextDbReadTick();
   renderLiveRows();
+  renderMarketDbRows();
   renderMarketPriceRows();
+  const restoredPostable = collectRowsForPost({ auto: true }).rowsToPost.length;
+  if (restoredPostable > 0) {
+    scheduleAutoPostIdleFlush();
+  }
   setActiveView("dashboard");
   logLine("Items console ready");
 }

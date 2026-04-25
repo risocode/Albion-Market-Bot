@@ -138,6 +138,28 @@ input::placeholder { color:#7f89a1; }
 .btn-danger { background:#5a2c3c; border-color:#7e3d54; color:#ffc2d0; }
 .btn-primary:hover { filter:brightness(1.06); transform: translateY(-1px); }
 .btn-secondary:hover, .btn-danger:hover { filter:brightness(1.07); transform: translateY(-1px); }
+.btn-primary.is-loading {
+  position: relative;
+  pointer-events: none;
+  opacity: 0.95;
+}
+.btn-primary.is-loading::after {
+  content: "";
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-left: 8px;
+  border: 2px solid rgba(255, 255, 255, 0.5);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  vertical-align: -2px;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
 .hint-text { color:var(--muted); font-size:12px; margin:8px 0; }
 .catalog-accordion { flex:1; min-height:0; overflow:auto; border:1px solid #3a445a; border-radius:8px; padding:6px; background:#1f2430; }
 .catalog-section { border-bottom:1px solid #353d4e; padding:3px 0; }
@@ -178,6 +200,16 @@ button.catalog-item:hover { border-color:#8a71d8; }
 .controls-row { grid-template-columns:repeat(4,minmax(0,1fr)); }
 .controls-row--two { grid-template-columns:repeat(2,minmax(0,1fr)); }
 .checker-status-strip { display:flex; flex-wrap:wrap; gap:8px; margin-top:2px; }
+.resume-scan-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.resume-scan-row .toolbar-row {
+  flex-wrap: wrap;
+}
 .status-chip {
   display:inline-flex;
   align-items:center;
@@ -209,6 +241,12 @@ button.catalog-item:hover { border-color:#8a71d8; }
 }
 .data-table td { border-bottom:1px solid #24314b; padding:7px 8px; }
 .market-review-card { display:flex; flex-direction:column; min-height:0; flex:1; }
+.market-filter-row {
+  display: grid;
+  grid-template-columns: 1.2fr repeat(6, minmax(120px, 1fr));
+  gap: 8px;
+  margin-bottom: 8px;
+}
 .market-price-table .price-input {
   width: 110px;
   padding: 5px 8px;
@@ -236,6 +274,10 @@ button.catalog-item:hover { border-color:#8a71d8; }
 .status-badge.posted { border-color: #3f8c6a; color: #9cf3cc; background: #21382f; }
 .status-badge.failed { border-color: #8d4b5d; color: #ffc6d3; background: #3b252d; }
 .status-badge.invalid { border-color: #856b3f; color: #ffe3aa; background: #3c3320; }
+.market-price-table td.price-cell {
+  color: #ffd98e;
+  font-weight: 600;
+}
 .log-panel { min-height:170px; max-height:340px; overflow:auto; border:1px solid #3a445a; border-radius:8px; background:#1d2330; padding:10px; font-family:Consolas, monospace; font-size:12px; white-space:pre-wrap; }
 .settings-form { max-width:740px; }
 .setting-row { display:grid; grid-template-columns:260px 1fr; gap:10px; align-items:center; margin-bottom:10px; }

@@ -110,6 +110,10 @@ html, body {
   color: #95baff;
   font-weight: 600;
 }
+.eta-line {
+  color: #c7d6ff;
+  font-size: 12px;
+}
 .hotkeys {
   display: flex;
   flex-wrap: wrap;

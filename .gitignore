@@ -9,3 +9,5 @@ build/
 out/
 release/
 *.tmp
+.env
+.env.local

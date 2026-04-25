@@ -118,9 +118,13 @@ class ServiceHost:
             "toggleCategoryScanPause": lambda _payload: self._service.toggle_category_scan_pause(),
             "skipCategoryScanDelay": lambda _payload: self._service.skip_category_scan_delay(),
             "getCategoryScanState": lambda _payload: self._service.get_category_scan_state(),
+            "getResumeScanCheckpoint": lambda _payload: self._service.get_resume_scan_checkpoint(),
+            "resumeCategoryScanFromCheckpoint": lambda _payload: self._service.resume_category_scan_from_checkpoint(),
+            "clearCategoryScanCheckpoint": lambda _payload: self._service.clear_scan_checkpoint(),
             "getPriceHistory": lambda payload: self._service.get_price_history(
                 limit=int(payload.get("limit", 500))
             ),
+            "getMarketPriceRows": lambda payload: self._service.get_market_price_rows(payload),
             "postReviewedPrices": lambda payload: self._service.post_reviewed_prices(
                 rows=payload.get("rows", [])
             ),

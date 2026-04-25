@@ -43,6 +43,7 @@ src/albion_overlay_foundation.egg-info/requires.txt
 src/albion_overlay_foundation.egg-info/top_level.txt
 tests/test_logger.py
 tests/test_normalize.py
+tests/test_postgres_sink.py
 tests/test_scoring.py
 tests/test_service_protocol.py
 tests/test_session_store.py

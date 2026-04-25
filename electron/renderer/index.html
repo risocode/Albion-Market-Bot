@@ -118,6 +118,13 @@
                 <span id="status-price-region" class="status-chip">Price Region: Not set</span>
                 <span id="category-fetch-status" class="status-chip">Scan: Idle</span>
               </div>
+              <div class="resume-scan-row">
+                <span id="resume-scan-status" class="status-chip">Resume: No saved progress</span>
+                <div class="toolbar-row">
+                  <button id="btn-resume-last-scan" class="btn-secondary" type="button">Resume Last Scan</button>
+                  <button id="btn-discard-last-scan" class="btn-secondary" type="button">Discard Saved Progress</button>
+                </div>
+              </div>
             </article>
 
             <div class="prices-grid">
@@ -137,33 +144,42 @@
           <section class="view-panel" data-view="auction"><div class="view-head"><h1>Auction Helper</h1></div><article class="surface-card"></article></section>
 
           <section class="view-panel" data-view="market-price">
-            <div class="view-head"><h1>Market Price Review</h1></div>
+            <div class="view-head"><h1>Market Prices</h1></div>
             <article class="surface-card market-review-card">
-              <div class="card-header card-header-inline">
-                <h2>Review before Supabase post</h2>
-                <div class="toolbar-row">
-                  <button id="btn-market-post-all" class="btn-primary" type="button">Post All to Supabase</button>
-                  <button id="btn-market-clear-posted" class="btn-secondary" type="button">Clear Posted</button>
-                </div>
+              <div class="card-header">
+                <h2>Browse latest bot prices from database</h2>
               </div>
-              <p id="market-review-summary" class="hint-text">No rows yet.</p>
+              <div class="market-filter-row">
+                <input id="market-filter-search" placeholder="Search item..." autocomplete="off" />
+                <select id="market-filter-category"><option value="">All Categories</option></select>
+                <select id="market-filter-type"><option value="">All Types</option></select>
+                <select id="market-filter-tier"><option value="">All Tiers</option></select>
+                <select id="market-filter-enchant"><option value="">All Enchants</option></select>
+                <select id="market-filter-city"><option value="">All Regions</option></select>
+                <select id="market-filter-sort">
+                  <option value="last_updated_desc">Last Updated</option>
+                  <option value="price_desc">Price (High-Low)</option>
+                  <option value="price_asc">Price (Low-High)</option>
+                  <option value="item_asc">Item (A-Z)</option>
+                </select>
+              </div>
+              <p id="market-db-summary" class="hint-text">No database rows loaded yet.</p>
               <div class="table-wrap table-tall">
                 <table class="data-table market-price-table">
                   <thead>
                     <tr>
-                      <th>Time</th>
-                      <th>City</th>
-                      <th>Category</th>
                       <th>Item</th>
                       <th>Tier</th>
                       <th>Enchant</th>
-                      <th>OCR Price</th>
-                      <th>Final Price</th>
-                      <th>Status</th>
-                      <th>Actions</th>
+                      <th>City</th>
+                      <th>Category</th>
+                      <th>Type</th>
+                      <th>Quality</th>
+                      <th>Price</th>
+                      <th>Last Updated</th>
                     </tr>
                   </thead>
-                  <tbody id="market-price-body"></tbody>
+                  <tbody id="market-db-body"></tbody>
                 </table>
               </div>
             </article>

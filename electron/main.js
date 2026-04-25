@@ -206,6 +206,8 @@ function resolveBackendEnv() {
   env.PYTHONPATH = existingPythonPath
     ? `${srcPath}${path.delimiter}${existingPythonPath}`
     : srcPath;
+  // Backend loads .env.local/.env from this persistent user folder first.
+  env.ALBION_BOT_ENV_DIR = userDataPath;
   return env;
 }
 
@@ -270,6 +272,18 @@ function emitRawEvent(eventMessage) {
   ) {
     destroyItemPopupWindow();
   }
+  if (
+    eventMessage.type === "event" &&
+    eventMessage.event === "maintenanceDetected"
+  ) {
+    emitEvent("log", {
+      level: "warning",
+      message: "Maintenance detected by backend (15 consecutive no-data results). Closing app.",
+    });
+    setTimeout(() => {
+      app.quit();
+    }, 300);
+  }
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send("bot:event", eventMessage);
   }
@@ -330,15 +344,21 @@ function registerGlobalScanHotkeys() {
   globalShortcut.unregister("F1");
   globalShortcut.unregister("F2");
   globalShortcut.unregister("F5");
-  globalShortcut.register("F1", () => {
+  const okF1 = globalShortcut.register("F1", () => {
     safeScanControl("toggleCategoryScanPause");
   });
-  globalShortcut.register("F2", () => {
+  const okF2 = globalShortcut.register("F2", () => {
     safeScanControl("skipCategoryScanDelay");
   });
-  globalShortcut.register("F5", () => {
+  const okF5 = globalShortcut.register("F5", () => {
     safeScanControl("stopCategoryScan");
   });
+  if (!okF1 || !okF2 || !okF5) {
+    emitEvent("log", {
+      level: "warning",
+      message: `Global hotkey registration incomplete (F1=${okF1}, F2=${okF2}, F5=${okF5}). Renderer fallback hotkeys are enabled.`,
+    });
+  }
 }
 
 ipcMain.handle("bot:request", async (_event, command, payload) => {

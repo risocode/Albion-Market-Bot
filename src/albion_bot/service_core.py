@@ -14,7 +14,7 @@ from typing import Callable
 
 from PySide6.QtWidgets import QApplication
 
-from albion_bot.automation.market_query import MarketQueryAutomation
+from albion_bot.automation.market_query import MarketQueryAutomation, SearchAnchorInteractionError
 from albion_bot.capture.cursor_position import get_cursor_position
 from albion_bot.capture.point_selector import PointSelector
 from albion_bot.capture.region_selector import RegionSelector
@@ -87,17 +87,22 @@ class BotService:
         self._category_item_spacing_seconds = 2.0
         self._category_break_every_seconds = 60.0
         self._category_break_duration_seconds = 5.0
+        self._category_max_consecutive_no_data = 15
+        self._search_anchor_retry_limit = 3
+        self._search_anchor_retry_wait_seconds = 5.0
         self._category_scan_thread: threading.Thread | None = None
         self._category_scan_stop = threading.Event()
         self._category_scan_pause = threading.Event()
         self._category_scan_skip_spacing = threading.Event()
         self._category_scan_running = False
+        self._category_scan_checkpoint_file = Path("category_scan_checkpoint.json")
+        self._category_scan_checkpoint_lock = threading.Lock()
         self._calibration_file = Path("calibration_profile.json")
         self._load_calibration_profile()
         self._pg_sink = PostgresPriceSink(
             self._settings.database_url,
             source=self._settings.price_source,
-            include_history=self._settings.database_include_history,
+            include_history=False,
         )
 
     def get_state(self) -> dict:
@@ -441,13 +446,40 @@ class BotService:
             )
         )
 
+        scan_id = utc_now_iso()
+        self._write_category_scan_checkpoint(
+            {
+                "scanId": scan_id,
+                "categoryId": category,
+                "city": market_city,
+                "startedAt": scan_id,
+                "updatedAt": scan_id,
+                "finishedAt": "",
+                "totalItems": len(normalized_items),
+                "nextIndex": 0,
+                "processed": 0,
+                "failures": 0,
+                "cancelled": False,
+                "completed": False,
+                "items": [
+                    {
+                        "name": str(item.get("name") or ""),
+                        "id": str(item.get("id") or ""),
+                        "tier": item.get("tier"),
+                        "enchant": int(item.get("enchant") or 0),
+                    }
+                    for item in normalized_items
+                ],
+            }
+        )
+
         self._category_scan_stop.clear()
         self._category_scan_pause.clear()
         self._category_scan_skip_spacing.clear()
         self._category_scan_running = True
         self._category_scan_thread = threading.Thread(
             target=self._category_scan_worker,
-            args=(category, normalized_items, market_city),
+            args=(category, normalized_items, market_city, scan_id),
             daemon=True,
             name="category-scan",
         )
@@ -495,6 +527,71 @@ class BotService:
             "paused": self._category_scan_pause.is_set(),
         }
 
+    def get_resume_scan_checkpoint(self) -> dict:
+        checkpoint = self._load_category_scan_checkpoint()
+        if not checkpoint:
+            return {"hasCheckpoint": False}
+        valid, reason = self._validate_category_scan_checkpoint(checkpoint)
+        if not valid:
+            return {
+                "hasCheckpoint": True,
+                "resumable": False,
+                "invalid": True,
+                "reason": reason,
+                "checkpointPath": str(self._category_scan_checkpoint_file.resolve()),
+            }
+        total = int(checkpoint.get("totalItems") or 0)
+        next_index = int(checkpoint.get("nextIndex") or 0)
+        return {
+            "hasCheckpoint": True,
+            "resumable": not bool(checkpoint.get("completed")) and next_index < total,
+            "invalid": False,
+            "scanId": str(checkpoint.get("scanId") or ""),
+            "categoryId": str(checkpoint.get("categoryId") or ""),
+            "city": str(checkpoint.get("city") or ""),
+            "startedAt": str(checkpoint.get("startedAt") or ""),
+            "updatedAt": str(checkpoint.get("updatedAt") or ""),
+            "processed": int(checkpoint.get("processed") or 0),
+            "failures": int(checkpoint.get("failures") or 0),
+            "nextIndex": next_index,
+            "totalItems": total,
+            "cancelled": bool(checkpoint.get("cancelled")),
+            "completed": bool(checkpoint.get("completed")),
+            "checkpointPath": str(self._category_scan_checkpoint_file.resolve()),
+        }
+
+    def clear_scan_checkpoint(self) -> dict:
+        if self._category_scan_running:
+            raise RuntimeError("Cannot clear checkpoint while category scan is running.")
+        if self._category_scan_checkpoint_file.exists():
+            self._category_scan_checkpoint_file.unlink(missing_ok=True)
+        return {"cleared": True}
+
+    def resume_category_scan_from_checkpoint(self) -> dict:
+        if self._category_scan_running:
+            return {"running": True}
+        checkpoint = self._load_category_scan_checkpoint()
+        if not checkpoint:
+            raise ValueError("No saved scan checkpoint found.")
+        valid, reason = self._validate_category_scan_checkpoint(checkpoint)
+        if not valid:
+            raise ValueError(f"Saved checkpoint is invalid: {reason}")
+        if bool(checkpoint.get("completed")):
+            raise ValueError("Saved scan is already completed.")
+        total = int(checkpoint.get("totalItems") or 0)
+        next_index = int(checkpoint.get("nextIndex") or 0)
+        if next_index >= total:
+            raise ValueError("Saved scan has no remaining items to resume.")
+        items = list(checkpoint.get("items") or [])
+        remaining = items[next_index:]
+        if not remaining:
+            raise ValueError("Saved scan has no remaining items to resume.")
+        return self.run_category_scan(
+            category_id=str(checkpoint.get("categoryId") or ""),
+            items=remaining,
+            city=str(checkpoint.get("city") or ""),
+        )
+
     def _wait_while_category_paused(self) -> None:
         while self._category_scan_pause.is_set() and not self._category_scan_stop.is_set():
             time.sleep(0.12)
@@ -517,9 +614,15 @@ class BotService:
                 break
             time.sleep(min(0.1, remaining))
 
-    def _category_scan_worker(self, category: str, normalized_items: list[dict], city: str) -> None:
+    def _category_scan_worker(
+        self,
+        category: str,
+        normalized_items: list[dict],
+        city: str,
+        scan_id: str,
+    ) -> None:
         self._acquire_single_flight("runCategoryScan")
-        started_at = utc_now_iso()
+        started_at = scan_id or utc_now_iso()
         self._emit_event(
             "categoryScanStarted",
             {
@@ -534,6 +637,7 @@ class BotService:
         processed = 0
         failures = 0
         cancelled = False
+        consecutive_no_data = 0
         break_anchor = time.monotonic()
         try:
             for idx, item in enumerate(normalized_items, start=1):
@@ -562,16 +666,85 @@ class BotService:
                     tier=item.get("tier"),
                     enchant=item.get("enchant", 0),
                 )
-                scan_result = self._execute_query_scan(
-                    query_text=query_text,
-                    item_id=item["id"],
-                    max_retries=self._max_retries,
-                )
+                scan_result = None
+                anchor_failed = False
+                for anchor_try in range(1, self._search_anchor_retry_limit + 1):
+                    scan_result = self._execute_query_scan(
+                        query_text=query_text,
+                        item_id=item["id"],
+                        max_retries=self._max_retries,
+                    )
+                    err_text = str(scan_result.error or "")
+                    if not err_text.startswith("SEARCH_ANCHOR_ERROR:"):
+                        break
+                    if anchor_try < self._search_anchor_retry_limit:
+                        self._emit_event(
+                            "log",
+                            {
+                                "level": "warning",
+                                "message": (
+                                    f"Search box interaction failed ({anchor_try}/{self._search_anchor_retry_limit}). "
+                                    f"Retrying in {int(self._search_anchor_retry_wait_seconds)}s..."
+                                ),
+                            },
+                        )
+                        self._interruptible_category_wait(self._search_anchor_retry_wait_seconds)
+                        if self._category_scan_stop.is_set():
+                            cancelled = True
+                            break
+                    else:
+                        anchor_failed = True
+                if cancelled:
+                    break
+                if scan_result is None:
+                    anchor_failed = True
+                    scan_result = ScanResult(
+                        item_id=item["id"],
+                        query_text=query_text,
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        raw_text="",
+                        value=None,
+                        confidence=0.0,
+                        attempts=0,
+                        error="SEARCH_ANCHOR_ERROR: scan_result missing after retries",
+                    )
+                if anchor_failed:
+                    cancelled = True
+                    self._emit_event(
+                        "log",
+                        {
+                            "level": "warning",
+                            "message": (
+                                "Search box click/paste failed after 3 retries. "
+                                "Stopping scan and closing bot."
+                            ),
+                        },
+                    )
+                    self._emit_event(
+                        "maintenanceDetected",
+                        {
+                            "categoryId": category,
+                            "city": city,
+                            "index": idx,
+                            "totalItems": len(normalized_items),
+                            "reason": "search_anchor_retry_exhausted",
+                        },
+                    )
+                    break
                 if scan_result.value is not None:
                     self._state.set_last_value(scan_result.value)
                     self._logger.append_value(scan_result.value)
                 else:
                     failures += 1
+                try:
+                    numeric_value = int(scan_result.value) if scan_result.value is not None else None
+                except Exception:
+                    numeric_value = None
+                has_data = numeric_value is not None and numeric_value > 1
+                if has_data:
+                    consecutive_no_data = 0
+                else:
+                    consecutive_no_data += 1
                 self._append_market_price_row(category, city, item, scan_result)
                 processed += 1
                 self._emit_event(
@@ -586,6 +759,54 @@ class BotService:
                         "item": item,
                     },
                 )
+                self._write_category_scan_checkpoint(
+                    {
+                        "scanId": started_at,
+                        "categoryId": category,
+                        "city": city,
+                        "startedAt": started_at,
+                        "updatedAt": utc_now_iso(),
+                        "finishedAt": "",
+                        "totalItems": len(normalized_items),
+                        "nextIndex": idx,
+                        "processed": processed,
+                        "failures": failures,
+                        "cancelled": False,
+                        "completed": False,
+                        "items": [
+                            {
+                                "name": str(row.get("name") or ""),
+                                "id": str(row.get("id") or ""),
+                                "tier": row.get("tier"),
+                                "enchant": int(row.get("enchant") or 0),
+                            }
+                            for row in normalized_items
+                        ],
+                    }
+                )
+                if consecutive_no_data >= self._category_max_consecutive_no_data:
+                    cancelled = True
+                    self._emit_event(
+                        "log",
+                        {
+                            "level": "warning",
+                            "message": (
+                                "Detected 15 consecutive no-data OCR results. "
+                                "Possible game maintenance; stopping scan and closing bot."
+                            ),
+                        },
+                    )
+                    self._emit_event(
+                        "maintenanceDetected",
+                        {
+                            "categoryId": category,
+                            "city": city,
+                            "index": idx,
+                            "totalItems": len(normalized_items),
+                            "consecutiveNoData": consecutive_no_data,
+                        },
+                    )
+                    break
                 if idx < len(normalized_items):
                     self._interruptible_category_wait(self._category_item_spacing_seconds)
 
@@ -601,6 +822,31 @@ class BotService:
                 "outputFile": str(self._market_prices_file.resolve()),
             }
             self._emit_event("categoryScanFinished", summary)
+            self._write_category_scan_checkpoint(
+                {
+                    "scanId": started_at,
+                    "categoryId": category,
+                    "city": city,
+                    "startedAt": started_at,
+                    "updatedAt": finished_at,
+                    "finishedAt": finished_at,
+                    "totalItems": len(normalized_items),
+                    "nextIndex": processed,
+                    "processed": processed,
+                    "failures": failures,
+                    "cancelled": cancelled,
+                    "completed": not cancelled,
+                    "items": [
+                        {
+                            "name": str(row.get("name") or ""),
+                            "id": str(row.get("id") or ""),
+                            "tier": row.get("tier"),
+                            "enchant": int(row.get("enchant") or 0),
+                        }
+                        for row in normalized_items
+                    ],
+                }
+            )
         finally:
             self._category_scan_running = False
             self._category_scan_pause.clear()
@@ -609,13 +855,78 @@ class BotService:
             self._release_single_flight()
 
     def get_price_history(self, limit: int = 500) -> dict:
-        if not self._market_prices_file.exists():
-            return {"rows": [], "path": str(self._market_prices_file.resolve())}
-        with self._market_prices_file.open("r", encoding="utf-8", newline="") as fh:
-            rows = list(DictReader(fh))
-        rows = rows[-max(1, int(limit)) :]
-        rows.reverse()
+        cap = max(1, int(limit))
+        rows: list[dict] = []
+        if self._market_prices_file.exists():
+            with self._market_prices_file.open("r", encoding="utf-8", newline="") as fh:
+                csv_rows = list(DictReader(fh))
+            csv_rows = csv_rows[-cap:]
+            csv_rows.reverse()
+            rows.extend(csv_rows)
+        if self._pg_sink.enabled:
+            db_rows = self._pg_sink.fetch_recent_prices(
+                limit=cap,
+                emit_log=lambda level, msg: self._emit_event("log", {"level": level, "message": msg}),
+            )
+            rows.extend(db_rows)
+
+        def _ts_key(row: dict) -> datetime:
+            raw = str(row.get("timestamp") or "").replace("Z", "+00:00")
+            try:
+                dt = datetime.fromisoformat(raw)
+            except ValueError:
+                return datetime.min.replace(tzinfo=timezone.utc)
+            if dt.tzinfo is None:
+                return dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+
+        rows.sort(key=_ts_key, reverse=True)
+        rows = rows[:cap]
         return {"rows": rows, "path": str(self._market_prices_file.resolve())}
+
+    def get_market_price_rows(self, payload: dict | None = None) -> dict:
+        body = payload or {}
+        search = str(body.get("search") or "").strip()
+        category = str(body.get("category") or "").strip()
+        item_type = str(body.get("type") or "").strip()
+        city = str(body.get("city") or "").strip()
+        sort = str(body.get("sort") or "last_updated_desc").strip()
+        tier_raw = body.get("tier")
+        enchant_raw = body.get("enchant")
+        tier = int(tier_raw) if tier_raw not in (None, "", "all") else None
+        enchant = int(enchant_raw) if enchant_raw not in (None, "", "all") else None
+        limit = max(1, int(body.get("limit", 1000)))
+        offset = max(0, int(body.get("offset", 0)))
+        bot_only = bool(body.get("botOnly", True))
+
+        rows = self._pg_sink.fetch_market_price_rows(
+            search=search,
+            city=city,
+            tier=tier,
+            enchant=enchant,
+            category=category,
+            item_type=item_type,
+            sort=sort,
+            limit=limit,
+            offset=offset,
+            bot_only=bot_only,
+            emit_log=lambda level, msg: self._emit_event("log", {"level": level, "message": msg}),
+        )
+        categories = sorted({str(r.get("category") or "").strip() for r in rows if r.get("category")})
+        types = sorted({str(r.get("type") or "").strip() for r in rows if r.get("type") and r.get("type") != "-"})
+        cities = sorted({str(r.get("city") or "").strip() for r in rows if r.get("city")})
+        tiers = sorted({int(r.get("tier")) for r in rows if r.get("tier") is not None})
+        enchants = sorted({int(r.get("enchant") or 0) for r in rows})
+        return {
+            "rows": rows,
+            "filters": {
+                "categories": categories,
+                "types": types,
+                "cities": cities,
+                "tiers": tiers,
+                "enchants": enchants,
+            },
+        }
 
     def post_reviewed_prices(self, rows: list[dict]) -> dict:
         if not isinstance(rows, list):
@@ -634,9 +945,9 @@ class BotService:
                     raise ValueError("itemUniqueName is required.")
                 if not city:
                     raise ValueError("city is required.")
-                if price <= 0:
-                    raise ValueError("price must be greater than zero.")
-                self._post_item_price_to_database(
+                if price < 0:
+                    raise ValueError("price must be zero or greater.")
+                ok, err = self._post_item_price_to_database(
                     item_unique_name=item_unique_name,
                     item_name=item_name,
                     tier=(int(row["tier"]) if row.get("tier") is not None else None),
@@ -646,6 +957,8 @@ class BotService:
                     posted_at_iso=str(row.get("postedAt") or ""),
                     context="reviewedPost",
                 )
+                if not ok:
+                    raise RuntimeError(err or "Unknown database post error.")
                 posted += 1
                 results.append({"rowId": row_id, "ok": True, "error": None})
             except Exception as exc:
@@ -718,6 +1031,17 @@ class BotService:
                     attempts=attempt,
                 )
             except Exception as exc:  # pragma: no cover
+                if isinstance(exc, SearchAnchorInteractionError):
+                    return ScanResult(
+                        item_id=item_id,
+                        query_text=query_text,
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        raw_text="",
+                        value=None,
+                        confidence=0.0,
+                        attempts=attempt,
+                        error=f"SEARCH_ANCHOR_ERROR: {exc}",
+                    )
                 last_error = exc
         return ScanResult(
             item_id=item_id,
@@ -761,6 +1085,7 @@ class BotService:
             "recommendationsCsv": str(Path("recommendations_log.csv")),
             "watchlistFile": str(Path("watchlist.json")),
             "calibrationFile": str(self._calibration_file),
+            "categoryScanCheckpointFile": str(self._category_scan_checkpoint_file),
             "postgresEnabled": self._pg_sink.enabled,
             "defaultPriceCityConfigured": bool(str(self._settings.default_price_city or "").strip()),
             "ocrFailureRate": (
@@ -812,6 +1137,53 @@ class BotService:
             encoding="utf-8",
         )
 
+    def _load_category_scan_checkpoint(self) -> dict | None:
+        if not self._category_scan_checkpoint_file.exists():
+            return None
+        try:
+            payload = json.loads(self._category_scan_checkpoint_file.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return payload
+
+    @staticmethod
+    def _validate_category_scan_checkpoint(payload: dict) -> tuple[bool, str | None]:
+        required = ("categoryId", "city", "totalItems", "nextIndex", "items")
+        for key in required:
+            if key not in payload:
+                return False, f"missing field: {key}"
+        items = payload.get("items")
+        if not isinstance(items, list):
+            return False, "items must be a list"
+        try:
+            total = int(payload.get("totalItems") or 0)
+            next_index = int(payload.get("nextIndex") or 0)
+        except Exception:
+            return False, "totalItems/nextIndex must be integers"
+        if total < 0 or next_index < 0:
+            return False, "negative counters are not allowed"
+        if next_index > total:
+            return False, "nextIndex cannot be greater than totalItems"
+        if total != len(items):
+            return False, "totalItems does not match items length"
+        return True, None
+
+    def _write_category_scan_checkpoint(self, payload: dict) -> None:
+        valid, reason = self._validate_category_scan_checkpoint(payload)
+        if not valid:
+            self._emit_event(
+                "log",
+                {"level": "error", "message": f"Checkpoint write skipped (invalid payload): {reason}"},
+            )
+            return
+        tmp = self._category_scan_checkpoint_file.with_suffix(".tmp")
+        text = json.dumps(payload, ensure_ascii=True, indent=2)
+        with self._category_scan_checkpoint_lock:
+            tmp.write_text(text, encoding="utf-8")
+            tmp.replace(self._category_scan_checkpoint_file)
+
     def _migrate_market_csv_if_legacy(self) -> None:
         path = self._market_prices_file
         if not path.exists() or path.stat().st_size == 0:
@@ -843,9 +1215,9 @@ class BotService:
         tier: int | None = None,
         enchantment: int = 0,
         tier_enchant_from_query: str | None = None,
-    ) -> None:
+    ) -> tuple[bool, str | None]:
         if not self._pg_sink.enabled:
-            return
+            return False, "Database posting is disabled (no DB URL configured)."
         display_name = item_name
         tier_val = tier
         enchant_val = enchantment
@@ -867,8 +1239,8 @@ class BotService:
                     ),
                 },
             )
-            return
-        self._pg_sink.post_fetch(
+            return False, "City is required."
+        return self._pg_sink.post_fetch(
             item_unique_name=item_unique_name,
             item_name=display_name,
             tier=tier_val,
