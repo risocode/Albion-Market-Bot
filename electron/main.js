@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Menu, screen } = require("electron");
+const { app, BrowserWindow, ipcMain, Menu, screen, globalShortcut } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const { spawn } = require("child_process");
@@ -100,6 +100,12 @@ function createStatusWindow() {
   });
   statusWindow.once("ready-to-show", () => {
     if (statusWindow && !statusWindow.isDestroyed()) {
+      const display = screen.getPrimaryDisplay();
+      const area = display.workArea;
+      const [winW, winH] = statusWindow.getSize();
+      const x = area.x + Math.max(0, Math.floor((area.width - winW) / 2));
+      const y = area.y + Math.max(0, area.height - winH - 10);
+      statusWindow.setPosition(x, y);
       statusWindow.show();
     }
   });
@@ -116,12 +122,12 @@ function createItemPopupWindow() {
     return itemPopupWindow;
   }
   itemPopupWindow = new BrowserWindow({
-    width: 360,
-    height: 126,
-    minWidth: 320,
-    maxWidth: 460,
-    minHeight: 110,
-    maxHeight: 180,
+    width: 410,
+    height: 290,
+    minWidth: 360,
+    maxWidth: 520,
+    minHeight: 220,
+    maxHeight: 420,
     resizable: false,
     frame: false,
     transparent: false,
@@ -312,6 +318,29 @@ function sendRequest(command, payload = {}) {
   });
 }
 
+async function safeScanControl(command) {
+  try {
+    await sendRequest(command, {});
+  } catch (_error) {
+    // ignore when no scan is active or backend is restarting
+  }
+}
+
+function registerGlobalScanHotkeys() {
+  globalShortcut.unregister("F1");
+  globalShortcut.unregister("F2");
+  globalShortcut.unregister("F5");
+  globalShortcut.register("F1", () => {
+    safeScanControl("toggleCategoryScanPause");
+  });
+  globalShortcut.register("F2", () => {
+    safeScanControl("skipCategoryScanDelay");
+  });
+  globalShortcut.register("F5", () => {
+    safeScanControl("stopCategoryScan");
+  });
+}
+
 ipcMain.handle("bot:request", async (_event, command, payload) => {
   const response = await sendRequest(command, payload);
   if (response.error) {
@@ -355,6 +384,8 @@ ipcMain.handle("window:set-progress", async (_event, value) => {
   return true;
 });
 
+ipcMain.handle("app:version", async () => app.getVersion());
+
 ipcMain.handle("status-window:open", async () => {
   createStatusWindow();
   return true;
@@ -397,6 +428,7 @@ app.whenReady().then(() => {
   Menu.setApplicationMenu(null);
   createWindow();
   startBackend();
+  registerGlobalScanHotkeys();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
@@ -411,4 +443,8 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {
     app.quit();
   }
+});
+
+app.on("will-quit", () => {
+  globalShortcut.unregisterAll();
 });

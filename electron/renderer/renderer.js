@@ -998,6 +998,13 @@ function wireEvents() {
 
 async function bootstrap() {
   setBackendStatus("Connected");
+  try {
+    const ver = await window.botApi.getAppVersion();
+    const vNode = byId("footer-version");
+    if (vNode) vNode.textContent = `Version ${ver}`;
+  } catch (_error) {
+    // keep default footer text if version lookup fails
+  }
   wireNavigation();
   wireActions();
   wireEvents();

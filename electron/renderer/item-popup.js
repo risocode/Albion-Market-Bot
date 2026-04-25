@@ -11,16 +11,35 @@ function formatValue(value) {
 function onEvent(msg) {
   const ev = msg.event;
   const payload = msg.payload || {};
+  const list = $("item-list");
+  const appendResult = (name, price) => {
+    if (!list) return;
+    const row = document.createElement("div");
+    row.className = "item-row";
+    row.innerHTML = `
+      <span class="item-name">${name || "Unknown item"}</span>
+      <span class="item-price">${price}</span>
+    `;
+    list.prepend(row);
+    while (list.children.length > 4) {
+      list.removeChild(list.lastElementChild);
+    }
+  };
   if (ev === "categoryScanStarted") {
-    $("item-name").textContent = "Starting scan...";
-    $("item-price").textContent = "--";
+    if (list) {
+      list.innerHTML = `
+        <div class="item-row">
+          <span class="item-name">Starting scan...</span>
+          <span class="item-price">--</span>
+        </div>
+      `;
+    }
     $("item-sub").textContent = `${payload.city || ""} ${payload.categoryId || ""}`.trim() || "Running";
     return;
   }
   if (ev === "categoryScanItem") {
     const scan = payload.scanResult || {};
-    $("item-name").textContent = scan.queryText || payload.item?.name || "Unknown item";
-    $("item-price").textContent = formatValue(scan.value);
+    appendResult(scan.queryText || payload.item?.name || "Unknown item", formatValue(scan.value));
     const idx = Number(payload.index || 0);
     const total = Number(payload.totalItems || 0);
     $("item-sub").textContent = `${idx}/${total}${payload.city ? ` · ${payload.city}` : ""}`;

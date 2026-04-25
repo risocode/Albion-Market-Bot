@@ -14,7 +14,17 @@ html, body {
   padding: 12px;
   display: flex;
   flex-direction: column;
-  justify-content: center;
+  gap: 10px;
+}
+.popup-head {
+  font-size: 12px;
+  color: #c8d5ef;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.item-list {
+  display: flex;
+  flex-direction: column;
   gap: 8px;
 }
 .item-row {
@@ -22,9 +32,13 @@ html, body {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  border: 1px solid #33415a;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #1f2635;
 }
 .item-name {
-  font-size: 19px;
+  font-size: 14px;
   color: #edf2ff;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -33,10 +47,11 @@ html, body {
 .item-price {
   color: #78a9ff;
   font-weight: 700;
-  font-size: 28px;
+  font-size: 22px;
 }
 .item-sub {
   margin: 0;
   color: #9aa7c2;
   font-size: 12px;
+  margin-top: auto;
 }

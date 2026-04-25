@@ -4,6 +4,7 @@ from PySide6.QtCore import QEventLoop, QPoint, QRect, Qt, Signal
 from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QWidget
 
+from albion_bot.capture.cursor_position import get_cursor_position
 from albion_bot.state.runtime_state import CaptureRegion
 
 
@@ -37,20 +38,23 @@ class RegionSelector(QWidget):
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
-            self._start_point = event.globalPosition().toPoint()
+            cursor = get_cursor_position()
+            self._start_point = QPoint(cursor.x, cursor.y)
             self._end_point = self._start_point
             self._is_dragging = True
             self.update()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if self._is_dragging:
-            self._end_point = event.globalPosition().toPoint()
+            cursor = get_cursor_position()
+            self._end_point = QPoint(cursor.x, cursor.y)
             self.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() != Qt.MouseButton.LeftButton:
             return
-        self._end_point = event.globalPosition().toPoint()
+        cursor = get_cursor_position()
+        self._end_point = QPoint(cursor.x, cursor.y)
         self._is_dragging = False
         rect = QRect(self._start_point, self._end_point).normalized()
         region = None
