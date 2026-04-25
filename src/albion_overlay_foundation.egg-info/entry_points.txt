@@ -1,2 +1,3 @@
 [console_scripts]
 albion-bot = albion_bot.app:main
+albion-bot-service = albion_bot.service_main:main

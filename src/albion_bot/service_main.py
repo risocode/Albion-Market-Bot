@@ -113,8 +113,16 @@ class ServiceHost:
                 city=str(payload.get("city") or ""),
             ),
             "stopCategoryScan": lambda _payload: self._service.stop_category_scan(),
+            "pauseCategoryScan": lambda _payload: self._service.pause_category_scan(),
+            "resumeCategoryScan": lambda _payload: self._service.resume_category_scan(),
+            "toggleCategoryScanPause": lambda _payload: self._service.toggle_category_scan_pause(),
+            "skipCategoryScanDelay": lambda _payload: self._service.skip_category_scan_delay(),
+            "getCategoryScanState": lambda _payload: self._service.get_category_scan_state(),
             "getPriceHistory": lambda payload: self._service.get_price_history(
                 limit=int(payload.get("limit", 500))
+            ),
+            "postReviewedPrices": lambda payload: self._service.post_reviewed_prices(
+                rows=payload.get("rows", [])
             ),
         }
         if command not in mapping:

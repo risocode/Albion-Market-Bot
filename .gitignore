@@ -3,5 +3,9 @@ dist/
 *.log
 __pycache__/
 .pytest_cache/
-.electron-user-data/albion_items_raw.json
-.electron-user-data/albion_items_catalog.json
+.venv/
+.electron-user-data/
+build/
+out/
+release/
+*.tmp

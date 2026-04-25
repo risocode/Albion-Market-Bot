@@ -30,4 +30,13 @@ contextBridge.exposeInMainWorld("botApi", {
   setWindowProgress(value) {
     return ipcRenderer.invoke("window:set-progress", value);
   },
+  openStatusWindow() {
+    return ipcRenderer.invoke("status-window:open");
+  },
+  closeStatusWindow() {
+    return ipcRenderer.invoke("status-window:close");
+  },
+  scanControl(action) {
+    return ipcRenderer.invoke("scan:control", action);
+  },
 });

@@ -4,6 +4,7 @@ from PySide6.QtCore import QEventLoop, QPoint, Qt, Signal
 from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QWidget
 
+from albion_bot.capture.cursor_position import get_cursor_position
 from albion_bot.state.runtime_state import ScreenPoint
 
 
@@ -38,8 +39,9 @@ class PointSelector(QWidget):
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() != Qt.MouseButton.LeftButton:
             return
-        point = event.position().toPoint()
-        self.point_selected.emit(ScreenPoint(x=point.x(), y=point.y()))
+        # Read physical cursor coordinates from Windows API to avoid DPI scaling offsets.
+        point = get_cursor_position()
+        self.point_selected.emit(ScreenPoint(x=point.x, y=point.y))
         self.close()
 
     def keyPressEvent(self, event) -> None:  # noqa: N802

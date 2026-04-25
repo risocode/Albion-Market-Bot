@@ -30,6 +30,12 @@ from albion_bot.recommendation.session_store import SessionStore
 from albion_bot.recommendation.watchlist_repo import WatchlistRepo
 from albion_bot.recommendation.watchlist_store import WatchlistStore
 from albion_bot.state.runtime_state import CaptureRegion, RuntimeState, ScreenPoint
+from albion_bot.persistence.postgres_sink import (
+    PostgresPriceSink,
+    manual_fetch_unique_name,
+    parse_query_tier_enchant,
+    watchlist_fetch_unique_name,
+)
 
 
 @dataclass(slots=True)
@@ -83,9 +89,16 @@ class BotService:
         self._category_break_duration_seconds = 5.0
         self._category_scan_thread: threading.Thread | None = None
         self._category_scan_stop = threading.Event()
+        self._category_scan_pause = threading.Event()
+        self._category_scan_skip_spacing = threading.Event()
         self._category_scan_running = False
         self._calibration_file = Path("calibration_profile.json")
         self._load_calibration_profile()
+        self._pg_sink = PostgresPriceSink(
+            self._settings.database_url,
+            source=self._settings.price_source,
+            include_history=self._settings.database_include_history,
+        )
 
     def get_state(self) -> dict:
         session_stats = self._session.stats()
@@ -192,6 +205,15 @@ class BotService:
             value = scan_result.value
             self._state.set_last_value(value)
             self._logger.append_value(value)
+            self._post_item_price_to_database(
+                item_unique_name=manual_fetch_unique_name(self._query_text),
+                item_name=self._query_text.strip(),
+                city=self._settings.default_price_city,
+                price=value,
+                posted_at_iso=scan_result.timestamp,
+                context="runQueryOnce",
+                tier_enchant_from_query=self._query_text,
+            )
             payload = {
                 "timestamp": scan_result.timestamp,
                 "queryText": self._query_text,
@@ -279,6 +301,17 @@ class BotService:
                     if scan_result.value is not None:
                         self._state.set_last_value(scan_result.value)
                         self._logger.append_value(scan_result.value)
+                        base_name, tier_p, enchant_p = parse_query_tier_enchant(item.query_text)
+                        self._post_item_price_to_database(
+                            item_unique_name=watchlist_fetch_unique_name(item.id),
+                            item_name=(base_name or item.query_text.strip()),
+                            city=self._settings.default_price_city,
+                            price=scan_result.value,
+                            posted_at_iso=scan_result.timestamp,
+                            context="watchlist",
+                            tier=tier_p,
+                            enchantment=enchant_p,
+                        )
                     else:
                         failures += 1
 
@@ -409,6 +442,8 @@ class BotService:
         )
 
         self._category_scan_stop.clear()
+        self._category_scan_pause.clear()
+        self._category_scan_skip_spacing.clear()
         self._category_scan_running = True
         self._category_scan_thread = threading.Thread(
             target=self._category_scan_worker,
@@ -426,7 +461,61 @@ class BotService:
 
     def stop_category_scan(self) -> dict:
         self._category_scan_stop.set()
+        self._category_scan_pause.clear()
         return {"running": self._category_scan_running}
+
+    def pause_category_scan(self) -> dict:
+        if not self._category_scan_running:
+            return {"paused": False, "running": False}
+        self._category_scan_pause.set()
+        return {"paused": True, "running": True}
+
+    def resume_category_scan(self) -> dict:
+        self._category_scan_pause.clear()
+        return {"paused": False, "running": self._category_scan_running}
+
+    def toggle_category_scan_pause(self) -> dict:
+        if not self._category_scan_running:
+            return {"paused": False, "running": False}
+        if self._category_scan_pause.is_set():
+            self._category_scan_pause.clear()
+            return {"paused": False, "running": True}
+        self._category_scan_pause.set()
+        return {"paused": True, "running": True}
+
+    def skip_category_scan_delay(self) -> dict:
+        if not self._category_scan_running:
+            return {"skipped": False, "running": False}
+        self._category_scan_skip_spacing.set()
+        return {"skipped": True, "running": True}
+
+    def get_category_scan_state(self) -> dict:
+        return {
+            "running": self._category_scan_running,
+            "paused": self._category_scan_pause.is_set(),
+        }
+
+    def _wait_while_category_paused(self) -> None:
+        while self._category_scan_pause.is_set() and not self._category_scan_stop.is_set():
+            time.sleep(0.12)
+
+    def _interruptible_category_wait(self, seconds: float) -> None:
+        if seconds <= 0:
+            return
+        deadline = time.monotonic() + float(seconds)
+        while time.monotonic() < deadline:
+            if self._category_scan_stop.is_set():
+                return
+            if self._category_scan_skip_spacing.is_set():
+                self._category_scan_skip_spacing.clear()
+                return
+            self._wait_while_category_paused()
+            if self._category_scan_stop.is_set():
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.1, remaining))
 
     def _category_scan_worker(self, category: str, normalized_items: list[dict], city: str) -> None:
         self._acquire_single_flight("runCategoryScan")
@@ -451,6 +540,10 @@ class BotService:
                 if self._category_scan_stop.is_set():
                     cancelled = True
                     break
+                self._wait_while_category_paused()
+                if self._category_scan_stop.is_set():
+                    cancelled = True
+                    break
                 if time.monotonic() - break_anchor >= self._category_break_every_seconds:
                     self._emit_event(
                         "log",
@@ -459,7 +552,7 @@ class BotService:
                             "message": f"Human break: pausing {self._category_break_duration_seconds:.0f}s before next item.",
                         },
                     )
-                    self._category_scan_stop.wait(self._category_break_duration_seconds)
+                    self._interruptible_category_wait(self._category_break_duration_seconds)
                     break_anchor = time.monotonic()
                     if self._category_scan_stop.is_set():
                         cancelled = True
@@ -494,7 +587,7 @@ class BotService:
                     },
                 )
                 if idx < len(normalized_items):
-                    self._category_scan_stop.wait(self._category_item_spacing_seconds)
+                    self._interruptible_category_wait(self._category_item_spacing_seconds)
 
             finished_at = utc_now_iso()
             summary = {
@@ -510,6 +603,8 @@ class BotService:
             self._emit_event("categoryScanFinished", summary)
         finally:
             self._category_scan_running = False
+            self._category_scan_pause.clear()
+            self._category_scan_skip_spacing.clear()
             self._emit_event("status", {"runtimeStatus": "Idle"})
             self._release_single_flight()
 
@@ -521,6 +616,42 @@ class BotService:
         rows = rows[-max(1, int(limit)) :]
         rows.reverse()
         return {"rows": rows, "path": str(self._market_prices_file.resolve())}
+
+    def post_reviewed_prices(self, rows: list[dict]) -> dict:
+        if not isinstance(rows, list):
+            raise ValueError("rows must be a list.")
+        results: list[dict] = []
+        posted = 0
+        failed = 0
+        for row in rows:
+            row_id = str(row.get("rowId") or "")
+            try:
+                item_unique_name = str(row.get("itemUniqueName") or "").strip()
+                item_name = str(row.get("itemName") or item_unique_name).strip()
+                city = str(row.get("city") or "").strip()
+                price = int(row.get("price"))
+                if not item_unique_name:
+                    raise ValueError("itemUniqueName is required.")
+                if not city:
+                    raise ValueError("city is required.")
+                if price <= 0:
+                    raise ValueError("price must be greater than zero.")
+                self._post_item_price_to_database(
+                    item_unique_name=item_unique_name,
+                    item_name=item_name,
+                    tier=(int(row["tier"]) if row.get("tier") is not None else None),
+                    enchantment=int(row.get("enchant") or 0),
+                    city=city,
+                    price=price,
+                    posted_at_iso=str(row.get("postedAt") or ""),
+                    context="reviewedPost",
+                )
+                posted += 1
+                results.append({"rowId": row_id, "ok": True, "error": None})
+            except Exception as exc:
+                failed += 1
+                results.append({"rowId": row_id, "ok": False, "error": str(exc)})
+        return {"posted": posted, "failed": failed, "results": results}
 
     def start_loop(self, interval_seconds: float) -> dict:
         if self._state.is_running():
@@ -630,6 +761,8 @@ class BotService:
             "recommendationsCsv": str(Path("recommendations_log.csv")),
             "watchlistFile": str(Path("watchlist.json")),
             "calibrationFile": str(self._calibration_file),
+            "postgresEnabled": self._pg_sink.enabled,
+            "defaultPriceCityConfigured": bool(str(self._settings.default_price_city or "").strip()),
             "ocrFailureRate": (
                 0.0
                 if stats.scan_items_total == 0
@@ -698,6 +831,54 @@ class BotService:
             },
         )
 
+    def _post_item_price_to_database(
+        self,
+        *,
+        item_unique_name: str,
+        item_name: str,
+        city: str,
+        price: int,
+        posted_at_iso: str | None,
+        context: str,
+        tier: int | None = None,
+        enchantment: int = 0,
+        tier_enchant_from_query: str | None = None,
+    ) -> None:
+        if not self._pg_sink.enabled:
+            return
+        display_name = item_name
+        tier_val = tier
+        enchant_val = enchantment
+        if tier_enchant_from_query:
+            base, t, en = parse_query_tier_enchant(tier_enchant_from_query)
+            display_name = base or display_name
+            tier_val = t
+            enchant_val = en
+        city_clean = str(city or "").strip()
+        if not city_clean:
+            self._emit_event(
+                "log",
+                {
+                    "level": "warning",
+                    "message": (
+                        f"Skipping database post ({context}): no city. "
+                        "Set ALBION_DEFAULT_PRICE_CITY (watchlist / single query) "
+                        "or use category fetch (city from UI)."
+                    ),
+                },
+            )
+            return
+        self._pg_sink.post_fetch(
+            item_unique_name=item_unique_name,
+            item_name=display_name,
+            tier=tier_val,
+            enchantment=int(enchant_val),
+            city=city_clean,
+            price=int(price),
+            posted_at_iso=posted_at_iso,
+            emit_log=lambda level, msg: self._emit_event("log", {"level": level, "message": msg}),
+        )
+
     def _append_market_price_row(
         self, category_id: str, city: str, item: dict, scan_result: ScanResult
     ) -> None:
@@ -734,6 +915,7 @@ class BotService:
             if write_header:
                 writer.writeheader()
             writer.writerow(row)
+        # Category scan DB posting is intentionally review-first via post_reviewed_prices.
 
     @staticmethod
     def _build_market_query_text(item_name: str, tier: int | None, enchant: int) -> str:

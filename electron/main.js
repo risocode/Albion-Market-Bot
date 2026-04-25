@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Menu } = require("electron");
+const { app, BrowserWindow, ipcMain, Menu, screen } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const { spawn } = require("child_process");
@@ -6,11 +6,23 @@ const readline = require("readline");
 const { ensureItemCatalog } = require("./itemCatalog");
 
 let mainWindow = null;
+let statusWindow = null;
+let itemPopupWindow = null;
+/** @type {object[]} */
+let statusEventQueue = [];
+/** @type {object[]} */
+let itemPopupEventQueue = [];
 let backend = null;
 let requestCounter = 0;
 const pendingRequests = new Map();
 
-const userDataPath = path.join(process.cwd(), ".electron-user-data");
+const projectRoot = process.cwd();
+const backendRoot = app.isPackaged
+  ? path.join(process.resourcesPath, "backend")
+  : projectRoot;
+const userDataPath = app.isPackaged
+  ? app.getPath("userData")
+  : path.join(projectRoot, ".electron-user-data");
 const sessionDataPath = path.join(userDataPath, "session");
 const cachePath = path.join(userDataPath, "cache");
 fs.mkdirSync(sessionDataPath, { recursive: true });
@@ -19,13 +31,139 @@ app.setPath("userData", userDataPath);
 app.setPath("sessionData", sessionDataPath);
 app.setPath("cache", cachePath);
 
+function flushStatusEventQueue() {
+  if (!statusWindow || statusWindow.isDestroyed()) {
+    statusEventQueue = [];
+    return;
+  }
+  while (statusEventQueue.length > 0) {
+    const msg = statusEventQueue.shift();
+    statusWindow.webContents.send("status:bot-event", msg);
+  }
+}
+
+function flushItemPopupEventQueue() {
+  if (!itemPopupWindow || itemPopupWindow.isDestroyed()) {
+    itemPopupEventQueue = [];
+    return;
+  }
+  while (itemPopupEventQueue.length > 0) {
+    const msg = itemPopupEventQueue.shift();
+    itemPopupWindow.webContents.send("item-popup:bot-event", msg);
+  }
+}
+
+function destroyStatusWindow() {
+  statusEventQueue = [];
+  if (statusWindow && !statusWindow.isDestroyed()) {
+    statusWindow.destroy();
+  }
+  statusWindow = null;
+}
+
+function destroyItemPopupWindow() {
+  itemPopupEventQueue = [];
+  if (itemPopupWindow && !itemPopupWindow.isDestroyed()) {
+    itemPopupWindow.destroy();
+  }
+  itemPopupWindow = null;
+}
+
+function createStatusWindow() {
+  if (statusWindow && !statusWindow.isDestroyed()) {
+    statusWindow.showInactive();
+    return statusWindow;
+  }
+  statusWindow = new BrowserWindow({
+    width: 420,
+    height: 186,
+    minWidth: 360,
+    maxWidth: 520,
+    minHeight: 168,
+    maxHeight: 240,
+    resizable: true,
+    frame: false,
+    transparent: false,
+    alwaysOnTop: true,
+    skipTaskbar: false,
+    backgroundColor: "#14171f",
+    webPreferences: {
+      preload: path.join(__dirname, "status-preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+    show: false,
+  });
+  statusWindow.loadFile(path.join(__dirname, "renderer", "status.html"));
+  statusWindow.webContents.once("did-finish-load", () => {
+    flushStatusEventQueue();
+  });
+  statusWindow.once("ready-to-show", () => {
+    if (statusWindow && !statusWindow.isDestroyed()) {
+      statusWindow.show();
+    }
+  });
+  statusWindow.on("closed", () => {
+    statusWindow = null;
+    statusEventQueue = [];
+  });
+  return statusWindow;
+}
+
+function createItemPopupWindow() {
+  if (itemPopupWindow && !itemPopupWindow.isDestroyed()) {
+    itemPopupWindow.showInactive();
+    return itemPopupWindow;
+  }
+  itemPopupWindow = new BrowserWindow({
+    width: 360,
+    height: 126,
+    minWidth: 320,
+    maxWidth: 460,
+    minHeight: 110,
+    maxHeight: 180,
+    resizable: false,
+    frame: false,
+    transparent: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    backgroundColor: "#14171f",
+    webPreferences: {
+      preload: path.join(__dirname, "item-popup-preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+    show: false,
+  });
+  itemPopupWindow.loadFile(path.join(__dirname, "renderer", "item-popup.html"));
+  itemPopupWindow.webContents.once("did-finish-load", () => {
+    flushItemPopupEventQueue();
+  });
+  itemPopupWindow.once("ready-to-show", () => {
+    if (itemPopupWindow && !itemPopupWindow.isDestroyed()) {
+      const display = screen.getPrimaryDisplay();
+      const area = display.workArea;
+      const [winW, winH] = itemPopupWindow.getSize();
+      const x = area.x + Math.max(0, area.width - winW - 20);
+      const y = area.y + Math.max(0, area.height - winH - 20);
+      itemPopupWindow.setPosition(x, y);
+      itemPopupWindow.showInactive();
+    }
+  });
+  itemPopupWindow.on("closed", () => {
+    itemPopupWindow = null;
+    itemPopupEventQueue = [];
+  });
+  return itemPopupWindow;
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1200,
-    height: 860,
-    minWidth: 980,
-    minHeight: 700,
-    backgroundColor: "#11161f",
+    width: 1240,
+    height: 880,
+    minWidth: 1020,
+    minHeight: 720,
+    backgroundColor: "#0a0c10",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -36,19 +174,40 @@ function createWindow() {
 
   mainWindow.setMenuBarVisibility(false);
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
+
+  mainWindow.on("close", () => {
+    destroyStatusWindow();
+    destroyItemPopupWindow();
+  });
 }
 
 function resolvePythonExecutable() {
+  const root = backendRoot;
   if (process.platform === "win32") {
-    return path.join(process.cwd(), ".venv", "Scripts", "python.exe");
+    return path.join(root, ".venv", "Scripts", "python.exe");
   }
-  return path.join(process.cwd(), ".venv", "bin", "python");
+  return path.join(root, ".venv", "bin", "python");
+}
+
+function resolveBackendCwd() {
+  return backendRoot;
+}
+
+function resolveBackendEnv() {
+  const env = { ...process.env };
+  const srcPath = path.join(backendRoot, "src");
+  const existingPythonPath = env.PYTHONPATH ? String(env.PYTHONPATH) : "";
+  env.PYTHONPATH = existingPythonPath
+    ? `${srcPath}${path.delimiter}${existingPythonPath}`
+    : srcPath;
+  return env;
 }
 
 function startBackend() {
   const pythonExecutable = resolvePythonExecutable();
   backend = spawn(pythonExecutable, ["-m", "albion_bot.service_main"], {
-    cwd: process.cwd(),
+    cwd: resolveBackendCwd(),
+    env: resolveBackendEnv(),
     stdio: ["pipe", "pipe", "pipe"],
   });
 
@@ -92,10 +251,36 @@ function startBackend() {
 }
 
 function emitRawEvent(eventMessage) {
-  if (!mainWindow || mainWindow.isDestroyed()) {
-    return;
+  if (
+    eventMessage.type === "event" &&
+    eventMessage.event === "categoryScanStarted"
+  ) {
+    createStatusWindow();
+    createItemPopupWindow();
   }
-  mainWindow.webContents.send("bot:event", eventMessage);
+  if (
+    eventMessage.type === "event" &&
+    eventMessage.event === "categoryScanFinished"
+  ) {
+    destroyItemPopupWindow();
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("bot:event", eventMessage);
+  }
+  if (statusWindow && !statusWindow.isDestroyed()) {
+    if (statusWindow.webContents.isLoading()) {
+      statusEventQueue.push(eventMessage);
+    } else {
+      statusWindow.webContents.send("status:bot-event", eventMessage);
+    }
+  }
+  if (itemPopupWindow && !itemPopupWindow.isDestroyed()) {
+    if (itemPopupWindow.webContents.isLoading()) {
+      itemPopupEventQueue.push(eventMessage);
+    } else {
+      itemPopupWindow.webContents.send("item-popup:bot-event", eventMessage);
+    }
+  }
 }
 
 function emitEvent(event, payload) {
@@ -168,6 +353,44 @@ ipcMain.handle("window:set-progress", async (_event, value) => {
     }
   }
   return true;
+});
+
+ipcMain.handle("status-window:open", async () => {
+  createStatusWindow();
+  return true;
+});
+
+ipcMain.handle("status-window:close", async () => {
+  destroyStatusWindow();
+  return true;
+});
+
+ipcMain.handle("status-window:toggle-pin", async () => {
+  if (!statusWindow || statusWindow.isDestroyed()) {
+    return { alwaysOnTop: true };
+  }
+  const next = !statusWindow.isAlwaysOnTop();
+  statusWindow.setAlwaysOnTop(next);
+  return { alwaysOnTop: next };
+});
+
+ipcMain.handle("scan:control", async (_event, action) => {
+  const map = {
+    pause: "pauseCategoryScan",
+    resume: "resumeCategoryScan",
+    togglePause: "toggleCategoryScanPause",
+    skip: "skipCategoryScanDelay",
+    stop: "stopCategoryScan",
+  };
+  const command = map[action];
+  if (!command) {
+    throw new Error(`Unknown scan action: ${action}`);
+  }
+  const response = await sendRequest(command, {});
+  if (response.error) {
+    throw new Error(response.error);
+  }
+  return response.payload ?? {};
 });
 
 app.whenReady().then(() => {

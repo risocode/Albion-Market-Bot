@@ -1,210 +1,214 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Albion Market Bot - Items</title>
+    <title>SoCaRi Market Bot</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <div class="app-shell">
-      <header class="topbar">
-        <div class="brand-wrap">
-          <div class="brand-icon">A</div>
+      <header class="app-topbar">
+        <div class="brand-block">
+          <div class="brand-icon">S</div>
           <div>
-            <h1>Albion Market Bot</h1>
-            <p id="top-status-line">Items + Watchlist Console</p>
+            <p class="brand-title">SoCaRi Market Bot</p>
+            <p id="top-status-line" class="brand-subtitle">Market automation dashboard.</p>
           </div>
         </div>
-        <div class="status-strip">
-          <span class="status-label">Backend</span>
-          <strong id="backend-status">Connecting...</strong>
-          <button id="btn-help" class="help-btn" type="button" title="Help and shortcuts">?</button>
+        <div class="topbar-center">SoCaRi Market Bot</div>
+        <div class="topbar-right">
+          <div class="backend-pill"><span>Backend</span><strong id="backend-status">Connecting...</strong></div>
+          <button id="btn-help" class="icon-btn" type="button" title="Help">?</button>
         </div>
       </header>
 
-      <div class="tab-nav">
-        <button class="tab-btn is-active" data-tab="items">Items</button>
-        <button class="tab-btn" data-tab="prices">Fetched Prices</button>
-      </div>
+      <div class="app-main">
+        <aside class="sidebar">
+          <button class="sidebar-toggle" type="button">☰</button>
+          <nav class="sidebar-nav">
+            <button class="nav-item is-active" data-view="dashboard">Dashboard</button>
+            <button class="nav-item" data-view="items">Items</button>
+            <button class="nav-item" data-view="check">Check</button>
+            <button class="nav-item" data-view="market-price">Market Price</button>
+            <button class="nav-item" data-view="buy">Buy</button>
+            <button class="nav-item" data-view="auction">Auction Helper</button>
+            <button class="nav-item" data-view="settings">Settings</button>
+          </nav>
+        </aside>
 
-      <main class="tab-panels">
-        <section class="tab-panel is-active" data-tab="items">
-          <section class="items-layout">
-            <article class="panel category-fetch-pane">
-              <h2>Category Fetch</h2>
-              <div class="row">
+        <main class="content-area">
+          <section class="view-panel is-active" data-view="dashboard">
+            <div class="view-head"><h1>Trading Dashboard</h1><span class="live-chip">LIVE</span></div>
+            <div class="stat-grid">
+              <article class="stat-card"><h3>Total Revenue</h3><p id="stat-revenue">--</p><small>All sales</small></article>
+              <article class="stat-card"><h3>Total Profit</h3><p id="stat-profit">--</p><small>Net earnings</small></article>
+              <article class="stat-card"><h3>Items Fetched</h3><p id="stat-items">--</p><small>Transactions</small></article>
+              <article class="stat-card"><h3>OCR Success</h3><p id="stat-success">--</p><small>Performance</small></article>
+            </div>
+            <div class="dashboard-grid">
+              <article class="surface-card">
+                <div class="card-header"><h2>Recent checker rows</h2></div>
+                <div class="table-wrap">
+                  <table class="data-table">
+                    <thead><tr><th>Time</th><th>City</th><th>Item</th><th>Price</th><th>Error</th></tr></thead>
+                    <tbody id="dashboard-live-body"></tbody>
+                  </table>
+                </div>
+              </article>
+              <article class="surface-card side-metrics">
+                <div class="metric-card"><h4>Top Traded Item</h4><p id="metric-top-item">--</p></div>
+                <div class="metric-card"><h4>Top City</h4><p id="metric-top-city">--</p></div>
+                <div class="metric-card"><h4>Best Item</h4><p id="metric-best-item">--</p></div>
+              </article>
+            </div>
+          </section>
+
+          <section class="view-panel" data-view="items">
+            <div class="view-head"><h1>Items Management</h1></div>
+            <div class="items-grid">
+              <article class="surface-card catalog-card">
+                <div class="card-header"><h2>Items (A-Z)</h2></div>
+                <div class="toolbar-row">
+                  <input id="input-catalog-filter" placeholder="Filter by item name..." autocomplete="off" />
+                  <button id="btn-catalog-clear" class="btn-secondary" type="button">Clear</button>
+                  <button id="btn-catalog-refresh" class="btn-primary" type="button">Refresh</button>
+                </div>
+                <p id="catalog-status" class="hint-text">Loading catalog...</p>
+                <div id="catalog-accordion" class="catalog-accordion"></div>
+              </article>
+
+              <article class="surface-card selected-card">
+                <div class="card-header card-header-inline"><h2>Selected Items</h2><button id="btn-watch-add" class="btn-primary" type="button">Add New Category</button></div>
+                <div class="toolbar-row"><input id="input-watch-filter" placeholder="Filter tracked items..." /></div>
+                <div class="table-wrap flex-grow">
+                  <table class="data-table">
+                    <thead><tr><th>On</th><th>Query</th><th>Target</th><th>Min %</th><th>Action</th></tr></thead>
+                    <tbody id="watchlist-body"></tbody>
+                  </table>
+                </div>
+                <div class="watch-entry-row">
+                  <input id="input-watch-query" placeholder="Item query" />
+                  <input id="input-watch-target" type="number" placeholder="Target" />
+                  <input id="input-watch-profit" type="number" step="0.1" min="0" value="5" />
+                </div>
+              </article>
+            </div>
+          </section>
+
+          <section class="view-panel" data-view="check">
+            <div class="view-head"><h1>Checker</h1></div>
+            <article class="surface-card check-controls">
+              <div class="city-pick-row">
+                <span class="city-pick-label">Market city</span>
+                <div id="city-chip-list" class="city-chip-list" aria-label="Choose market city"></div>
+              </div>
+              <div class="row-grid row-grid--checker-main">
                 <label for="select-fetch-category">Category</label>
                 <select id="select-fetch-category"></select>
+                <button id="btn-start-category-fetch" class="btn-primary" type="button">Start Category Fetch...</button>
+                <button id="btn-stop-category-fetch" class="btn-danger" type="button">Stop Fetch</button>
               </div>
-              <div class="actions left">
-                <button id="btn-start-category-fetch" type="button">Start Category Fetch…</button>
-                <button id="btn-stop-category-fetch" type="button">Stop Fetch</button>
+              <div class="row-grid controls-row controls-row--two">
+                <button id="btn-capture-search-point" class="btn-secondary" type="button">Pick Search Point</button>
+                <button id="btn-draw-price-region" class="btn-secondary" type="button">Draw Price Region</button>
               </div>
-              <div class="row">
-                <button id="btn-capture-search-point" type="button">Pick Search Point</button>
-                <button id="btn-save-search-point" type="button">Save Search Point</button>
-                <button id="btn-draw-price-region" type="button">Draw Price Region</button>
-                <button id="btn-save-price-region" type="button">Save OCR Region</button>
-              </div>
-              <p id="calibration-draft-status" class="hint-line">Pending changes: none</p>
-              <p id="calibration-status" class="hint-line">Calibration status: unknown</p>
-              <p id="category-fetch-status" class="hint-line">Idle</p>
-            </article>
-
-            <article class="panel catalog-pane">
-              <h2>Items Compendium (A-Z)</h2>
-              <p class="hint-line catalog-source">
-                Source:
-                <a href="https://github.com/ao-data/ao-bin-dumps/blob/master/formatted/items.json" target="_blank" rel="noreferrer">ao-bin-dumps items.json</a>
-                - tier from <code>T5_...</code>, enchant from <code>@1</code>. Item quality is selected in-game.
-              </p>
-              <div class="toolbar">
-                <input id="input-catalog-filter" placeholder="Search item, tier, enchant (e.g. scholar, T5, .1)..." autocomplete="off" />
-                <button type="button" id="btn-catalog-clear">Clear</button>
-                <button type="button" id="btn-catalog-refresh">Refresh</button>
-              </div>
-              <p id="catalog-status" class="catalog-status">Loading catalog...</p>
-              <div id="catalog-accordion" class="catalog-accordion"></div>
-            </article>
-
-            <article class="panel watch-editor-pane">
-              <h2>Watchlist Entry</h2>
-              <div class="row">
-                <label for="input-watch-query">Item query</label>
-                <input id="input-watch-query" placeholder="Click an item on the left to auto-fill" />
-              </div>
-              <div class="row">
-                <label for="input-watch-target">Target price</label>
-                <input id="input-watch-target" type="number" placeholder="Optional" />
-              </div>
-              <div class="row">
-                <label for="input-watch-profit">Min profit %</label>
-                <input id="input-watch-profit" type="number" step="0.1" min="0" value="5" />
-              </div>
-              <div class="actions">
-                <button id="btn-watch-add">Add to watchlist</button>
+              <div class="checker-status-strip">
+                <span id="status-search-point" class="status-chip">Search Point: Not set</span>
+                <span id="status-price-region" class="status-chip">Price Region: Not set</span>
+                <span id="category-fetch-status" class="status-chip">Scan: Idle</span>
               </div>
             </article>
 
-            <article class="panel watch-table-pane">
-              <div class="watch-header">
-                <h2>Tracked Items</h2>
-                <input id="input-watch-filter" placeholder="Filter tracked items..." />
-              </div>
-              <table>
-                <thead>
-                  <tr>
-                    <th>On</th>
-                    <th>Query</th>
-                    <th>Target</th>
-                    <th>Min %</th>
-                    <th>Action</th>
-                  </tr>
-                </thead>
-                <tbody id="watchlist-body"></tbody>
-              </table>
-            </article>
-
-            <article class="panel log-pane">
-              <h2>Activity Log</h2>
-              <div id="log-panel" class="log-panel"></div>
-            </article>
+            <div class="prices-grid">
+              <article class="surface-card">
+                <div class="card-header card-header-inline"><h2>Live Session Rows</h2><button id="btn-clear-live-rows" class="btn-secondary" type="button">Clear</button></div>
+                <div class="table-wrap table-tall">
+                  <table class="data-table">
+                    <thead><tr><th>Time</th><th>City</th><th>Category</th><th>Item</th><th>Price</th></tr></thead>
+                    <tbody id="live-prices-body"></tbody>
+                  </table>
+                </div>
+              </article>
+            </div>
           </section>
-        </section>
 
-        <section class="tab-panel" data-tab="prices">
-          <section class="prices-layout">
-            <article class="panel price-table-card">
-              <div class="watch-header">
-                <h2>Live Session Rows</h2>
-                <button id="btn-clear-live-rows" type="button">Clear</button>
+          <section class="view-panel" data-view="buy"><div class="view-head"><h1>Buy Process</h1></div><article class="surface-card"></article></section>
+          <section class="view-panel" data-view="auction"><div class="view-head"><h1>Auction Helper</h1></div><article class="surface-card"></article></section>
+
+          <section class="view-panel" data-view="market-price">
+            <div class="view-head"><h1>Market Price Review</h1></div>
+            <article class="surface-card market-review-card">
+              <div class="card-header card-header-inline">
+                <h2>Review before Supabase post</h2>
+                <div class="toolbar-row">
+                  <button id="btn-market-post-all" class="btn-primary" type="button">Post All to Supabase</button>
+                  <button id="btn-market-clear-posted" class="btn-secondary" type="button">Clear Posted</button>
+                </div>
               </div>
-              <div class="price-table-scroll" role="region" aria-label="Live session results">
-                <table>
+              <p id="market-review-summary" class="hint-text">No rows yet.</p>
+              <div class="table-wrap table-tall">
+                <table class="data-table market-price-table">
                   <thead>
                     <tr>
                       <th>Time</th>
                       <th>City</th>
                       <th>Category</th>
                       <th>Item</th>
-                      <th>Price</th>
-                      <th>Conf.</th>
-                      <th>Error</th>
-                    </tr>
-                  </thead>
-                  <tbody id="live-prices-body"></tbody>
-                </table>
-              </div>
-            </article>
-
-            <article class="panel price-table-card">
-              <div class="watch-header">
-                <h2>Saved CSV History</h2>
-                <button id="btn-refresh-history" type="button">Refresh</button>
-              </div>
-              <div class="price-table-scroll" role="region" aria-label="Saved CSV history">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Time</th>
-                      <th>City</th>
-                      <th>Category</th>
-                      <th>Item</th>
-                      <th>Price</th>
                       <th>Tier</th>
-                      <th>Ench.</th>
-                      <th>Error</th>
+                      <th>Enchant</th>
+                      <th>OCR Price</th>
+                      <th>Final Price</th>
+                      <th>Status</th>
+                      <th>Actions</th>
                     </tr>
                   </thead>
-                  <tbody id="history-prices-body"></tbody>
+                  <tbody id="market-price-body"></tbody>
                 </table>
               </div>
             </article>
           </section>
-        </section>
-      </main>
 
-      <div id="fetch-city-modal" class="help-modal is-hidden" role="dialog" aria-modal="true" aria-label="Choose city">
-        <div class="help-card fetch-city-card">
-          <div class="help-header">
-            <h3>Market city</h3>
-            <button id="btn-fetch-city-close" type="button">Cancel</button>
-          </div>
-          <p class="hint-line">
-            Open the market in-game in this city before starting. Fetched rows and the CSV are tagged with this city.
-          </p>
-          <div class="row fetch-city-row">
-            <label for="select-fetch-city">City</label>
-            <select id="select-fetch-city"></select>
-          </div>
-          <p id="fetch-city-summary" class="hint-line"></p>
-          <div class="fetch-city-actions">
-            <button id="btn-fetch-city-confirm" type="button">Start fetch</button>
-          </div>
+          <section class="view-panel" data-view="settings">
+            <div class="view-head"><h1>Settings</h1></div>
+            <article class="surface-card settings-form">
+              <div class="setting-row"><label>Writing speed (ms)</label><input id="setting-write-ms" type="number" value="100" /></div>
+              <div class="setting-row"><label>Clicking speed (ms)</label><input id="setting-click-ms" type="number" value="100" /></div>
+              <div class="setting-row"><label>Price listen duration (ms)</label><input id="setting-listen-ms" type="number" value="300" /></div>
+              <div class="setting-row"><label>Pause/Resume hotkey</label><input value="F1" disabled /></div>
+              <div class="setting-row"><label>Skip item hotkey</label><input value="F2" disabled /></div>
+              <div class="setting-row"><label>Stop hotkey</label><input value="F5" disabled /></div>
+              <div class="settings-actions"><button id="btn-save-settings" class="btn-primary" type="button">Save settings</button><button id="btn-reset-settings" class="btn-secondary" type="button">Reset</button></div>
+            </article>
+          </section>
+
+          <section class="view-panel" data-view="logs"><div class="view-head"><h1>Activity</h1></div><article class="surface-card"><div id="log-panel" class="log-panel"></div></article></section>
+        </main>
+      </div>
+      <footer class="app-footer">
+        <span>SoCaRi Market Bot</span>
+        <span class="footer-sep">•</span>
+        <span>Checker-ready layout</span>
+      </footer>
+
+      <div id="fetch-city-modal" class="overlay-modal is-hidden" role="dialog" aria-modal="true" aria-label="Choose city">
+        <div class="modal-card">
+          <div class="modal-head"><h3>Market city</h3><button id="btn-fetch-city-close" type="button" class="btn-secondary">Cancel</button></div>
+          <p class="hint-text">Open market in this city before starting fetch.</p>
+          <div class="row-grid"><label for="select-fetch-city">City</label><select id="select-fetch-city"></select></div>
+          <p id="fetch-city-summary" class="hint-text"></p>
+          <div class="modal-actions"><button id="btn-fetch-city-confirm" class="btn-primary" type="button">Start fetch</button></div>
         </div>
       </div>
 
-      <div id="help-modal" class="help-modal is-hidden" role="dialog" aria-modal="true" aria-label="Help">
-        <div class="help-card">
-          <div class="help-header">
-            <h3>Quick Help</h3>
-            <button id="btn-help-close" type="button">Close</button>
-          </div>
+      <div id="help-modal" class="overlay-modal is-hidden" role="dialog" aria-modal="true" aria-label="Help">
+        <div class="modal-card modal-wide">
+          <div class="modal-head"><h3>Quick Help</h3><button id="btn-help-close" type="button" class="btn-secondary">Close</button></div>
           <ul class="help-list">
-            <li><strong>Start scraping:</strong> Choose category → <em>Start Category Fetch</em> → pick city → confirm</li>
-            <li><strong>Stop scraping:</strong> Click <em>Stop Fetch</em></li>
-            <li><strong>View results:</strong> Open <em>Fetched Prices</em> tab for Live + CSV history</li>
-            <li><strong>Refresh catalog:</strong> Click <em>Refresh</em> in Items Compendium</li>
-            <li><strong>Add watch item:</strong> Click item from list → <em>Add to watchlist</em></li>
-          </ul>
-          <h4>Keyboard Shortcuts</h4>
-          <ul class="help-list">
-            <li><code>Ctrl+Shift+F</code> Start Category Fetch (choose city)</li>
-            <li><code>Ctrl+Shift+S</code> Stop Category Fetch</li>
-            <li><code>Ctrl+Shift+1</code> Open Items tab</li>
-            <li><code>Ctrl+Shift+2</code> Open Fetched Prices tab</li>
-            <li><code>Ctrl+Shift+H</code> Open/Close this Help</li>
+            <li><strong>Items:</strong> manage catalog and tracked watchlist rows.</li>
+            <li><strong>Check:</strong> run category scans and monitor live prices.</li>
+            <li><strong>Status Window:</strong> auto-opens during scan (F1 pause, F2 skip, F5 stop).</li>
+            <li><strong>Settings:</strong> store local UI preferences.</li>
           </ul>
         </div>
       </div>

@@ -1,15 +1,7 @@
-/** Royal + Caerleon + Brecilien — set your character in this city’s market before fetching. */
-const MARKET_CITIES = [
-  "Bridgewatch",
-  "Martlock",
-  "Thetford",
-  "Fort Sterling",
-  "Lymhurst",
-  "Caerleon",
-  "Brecilien",
-];
-
+﻿/** Royal + Caerleon + Brecilien — set your character in this city's market before fetching. */
+const MARKET_CITIES = ["Bridgewatch", "Martlock", "Thetford", "Fort Sterling", "Lymhurst", "Caerleon", "Brecilien"];
 const FETCH_CITY_STORAGE_KEY = "albionMarketFetchCity";
+const UI_PREFS_KEY = "albionUiPrefs";
 
 const EXACT_CATEGORY_ORDER = [
   { id: "weapons", label: "Weapons" },
@@ -30,7 +22,8 @@ const EXACT_CATEGORY_ORDER = [
 ];
 
 const state = {
-  activeTab: "items",
+  activeView: "dashboard",
+  selectedCity: "",
   watchlist: [],
   watchFilter: "",
   catalogFilter: "",
@@ -41,8 +34,8 @@ const state = {
   categoryProgress: { done: 0, total: 0, failures: 0, item: "", category: "", city: "" },
   searchPoint: null,
   region: null,
-  draftSearchPoint: null,
-  draftRegion: null,
+  marketPriceRows: [],
+  marketRowCounter: 0,
 };
 
 const CATALOG_RENDER_CAP = 400;
@@ -65,6 +58,58 @@ function formatRowTime(iso) {
   });
 }
 
+function toNumber(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function setBackendStatus(text) {
+  const n = byId("backend-status");
+  if (n) n.textContent = text;
+}
+
+function logLine(message) {
+  const panel = byId("log-panel");
+  if (!panel) return;
+  const stamp = new Date().toLocaleTimeString();
+  panel.textContent = `[${stamp}] ${message}\n${panel.textContent}`.slice(0, 18000);
+}
+
+async function request(command, payload = {}) {
+  try {
+    return await window.botApi.request(command, payload);
+  } catch (error) {
+    logLine(`Request ${command} failed: ${error.message}`);
+    throw error;
+  }
+}
+
+function setActiveView(view) {
+  state.activeView = view;
+  document.querySelectorAll(".nav-item").forEach((btn) => {
+    btn.classList.toggle("is-active", btn.dataset.view === view);
+  });
+  document.querySelectorAll(".view-panel").forEach((panel) => {
+    panel.classList.toggle("is-active", panel.dataset.view === view);
+  });
+}
+
+function setHelpVisible(visible) {
+  const modal = byId("help-modal");
+  if (!modal) return;
+  modal.classList.toggle("is-hidden", !visible);
+}
+
+function setFetchCityModalVisible(visible) {
+  const modal = byId("fetch-city-modal");
+  if (!modal) return;
+  modal.classList.toggle("is-hidden", !visible);
+}
+
 function renderFetchCityOptions() {
   const sel = byId("select-fetch-city");
   if (!sel) return;
@@ -81,10 +126,26 @@ function renderFetchCityOptions() {
   }
 }
 
-function setFetchCityModalVisible(visible) {
-  const modal = byId("fetch-city-modal");
-  if (!modal) return;
-  modal.classList.toggle("is-hidden", !visible);
+function renderCityChips() {
+  const root = byId("city-chip-list");
+  if (!root) return;
+  root.innerHTML = "";
+  for (const city of MARKET_CITIES) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `city-chip${state.selectedCity === city ? " is-active" : ""}`;
+    btn.dataset.city = city;
+    btn.textContent = city;
+    root.appendChild(btn);
+  }
+}
+
+function setSelectedCity(city) {
+  state.selectedCity = String(city || "").trim();
+  if (state.selectedCity) {
+    localStorage.setItem(FETCH_CITY_STORAGE_KEY, state.selectedCity);
+  }
+  renderCityChips();
 }
 
 function openFetchCityModal() {
@@ -96,48 +157,6 @@ function openFetchCityModal() {
   }
   renderFetchCityOptions();
   setFetchCityModalVisible(true);
-}
-
-function logLine(message) {
-  const panel = byId("log-panel");
-  if (!panel) return;
-  const stamp = new Date().toLocaleTimeString();
-  panel.textContent = `[${stamp}] ${message}\n${panel.textContent}`.slice(0, 12000);
-}
-
-function setBackendStatus(text) {
-  byId("backend-status").textContent = text;
-}
-
-function parseNumberInput(id, fallback = 0) {
-  const raw = byId(id).value;
-  const val = Number(raw);
-  return Number.isFinite(val) ? val : fallback;
-}
-
-async function request(command, payload = {}) {
-  try {
-    return await window.botApi.request(command, payload);
-  } catch (error) {
-    logLine(`Request ${command} failed: ${error.message}`);
-    throw error;
-  }
-}
-
-function setActiveTab(tab) {
-  state.activeTab = tab;
-  document.querySelectorAll(".tab-btn").forEach((btn) => {
-    btn.classList.toggle("is-active", btn.dataset.tab === tab);
-  });
-  document.querySelectorAll(".tab-panel").forEach((panel) => {
-    panel.classList.toggle("is-active", panel.dataset.tab === tab);
-  });
-}
-
-function setHelpVisible(visible) {
-  const modal = byId("help-modal");
-  if (!modal) return;
-  modal.classList.toggle("is-hidden", !visible);
 }
 
 function renderCategorySelector() {
@@ -162,60 +181,41 @@ function renderCategoryProgress() {
   const progress = state.categoryProgress;
   const btn = byId("btn-start-category-fetch");
   const stopBtn = byId("btn-stop-category-fetch");
-  if (btn) {
-    btn.disabled = state.isCategoryFetchRunning;
-  }
-  if (stopBtn) {
-    stopBtn.disabled = !state.isCategoryFetchRunning;
-  }
+  if (btn) btn.disabled = state.isCategoryFetchRunning;
+  if (stopBtn) stopBtn.disabled = !state.isCategoryFetchRunning;
   if (!node) return;
   if (!state.isCategoryFetchRunning && progress.total === 0) {
-    node.textContent = "Idle";
+    node.textContent = "Scan: Idle";
     return;
   }
   if (!state.isCategoryFetchRunning) {
-    node.textContent = `Done: ${progress.done}/${progress.total}, failures: ${progress.failures}${progress.city ? ` · ${progress.city}` : ""}`;
+    node.textContent = `Scan: Done ${progress.done}/${progress.total}${progress.failures ? ` · Fail ${progress.failures}` : ""}${progress.city ? ` · ${progress.city}` : ""}`;
     return;
   }
-  node.textContent = `Scanning ${progress.category}${progress.city ? ` @ ${progress.city}` : ""}: ${progress.done}/${progress.total}, failures: ${progress.failures}, current: ${progress.item || "-"}`;
+  node.textContent = `Scan: Running ${progress.done}/${progress.total}${progress.failures ? ` · Fail ${progress.failures}` : ""}${progress.city ? ` · ${progress.city}` : ""}`;
 }
 
 function renderCalibrationStatus() {
-  const node = byId("calibration-status");
-  if (!node) return;
+  const pointNode = byId("status-search-point");
+  const regionNode = byId("status-price-region");
+  const pointBtn = byId("btn-capture-search-point");
+  const regionBtn = byId("btn-draw-price-region");
+  if (!pointNode || !regionNode) return;
   const hasPoint = Boolean(state.searchPoint && Number.isFinite(state.searchPoint.x));
   const hasRegion = Boolean(state.region && Number.isFinite(state.region.width) && state.region.width > 2);
-  if (hasPoint && hasRegion) {
-    node.textContent = `Calibration status: ready (search: ${state.searchPoint.x},${state.searchPoint.y} | region: ${state.region.width}x${state.region.height})`;
-    return;
-  }
-  const missing = [];
-  if (!hasPoint) missing.push("search point");
-  if (!hasRegion) missing.push("price region");
-  node.textContent = `Calibration status: missing ${missing.join(" + ")}`;
-}
-
-function renderCalibrationDraftStatus() {
-  const node = byId("calibration-draft-status");
-  if (!node) return;
-  const hasDraftPoint = Boolean(state.draftSearchPoint);
-  const hasDraftRegion = Boolean(state.draftRegion);
-  if (!hasDraftPoint && !hasDraftRegion) {
-    node.textContent = "Pending changes: none";
-  } else {
-    const chunks = [];
-    if (hasDraftPoint) chunks.push("Search Point");
-    if (hasDraftRegion) chunks.push("OCR Region");
-    node.textContent = `Pending changes: ${chunks.join(" + ")} (click Save)`;
-  }
-  const savePointBtn = byId("btn-save-search-point");
-  const saveRegionBtn = byId("btn-save-price-region");
-  if (savePointBtn) savePointBtn.disabled = !hasDraftPoint;
-  if (saveRegionBtn) saveRegionBtn.disabled = !hasDraftRegion;
+  pointNode.textContent = hasPoint
+    ? `Search Point: ${state.searchPoint.x},${state.searchPoint.y}`
+    : "Search Point: Not set";
+  regionNode.textContent = hasRegion
+    ? `Price Region: ${state.region.width}x${state.region.height}`
+    : "Price Region: Not set";
+  if (pointBtn) pointBtn.textContent = hasPoint ? "Reselect Search Point" : "Pick Search Point";
+  if (regionBtn) regionBtn.textContent = hasRegion ? "Redraw Price Region" : "Draw Price Region";
 }
 
 function renderWatchlist() {
   const watchBody = byId("watchlist-body");
+  if (!watchBody) return;
   const filterText = state.watchFilter.trim().toLowerCase();
   const filtered = state.watchlist.filter((item) => {
     if (!filterText) return true;
@@ -230,7 +230,7 @@ function renderWatchlist() {
       <td>${item.queryText}</td>
       <td>${item.targetPrice ?? "--"}</td>
       <td>${item.minProfitPct}</td>
-      <td><button data-action="remove-watch" data-id="${item.id}">Remove</button></td>
+      <td><button class="btn-secondary" data-action="remove-watch" data-id="${item.id}">Remove</button></td>
     `;
     watchBody.appendChild(tr);
   }
@@ -249,28 +249,87 @@ function renderWatchlist() {
   });
 }
 
+function renderDashboardStats() {
+  const values = state.historyRows
+    .concat(state.liveRows)
+    .map((r) => toNumber(r.observed_price ?? r.value, 0))
+    .filter((n) => n > 0);
+  const totalRevenue = values.reduce((acc, n) => acc + n, 0);
+  const itemCount = state.liveRows.length;
+  const failures = state.liveRows.filter((r) => r.error).length;
+  const successRate = itemCount === 0 ? 0 : Math.max(0, ((itemCount - failures) / itemCount) * 100);
+
+  byId("stat-revenue").textContent = totalRevenue > 0 ? totalRevenue.toLocaleString() : "--";
+  // Profit is not emitted by backend yet; avoid mock estimation.
+  byId("stat-profit").textContent = "--";
+  byId("stat-items").textContent = itemCount > 0 ? String(itemCount) : "--";
+  byId("stat-success").textContent = itemCount > 0 ? `${successRate.toFixed(1)}%` : "--";
+
+  if (state.liveRows.length > 0) {
+    const topItem = state.liveRows[0].item_name || state.liveRows[0].queryText || "--";
+    const cityCount = new Map();
+    for (const row of state.liveRows) {
+      const city = row.city || "-";
+      cityCount.set(city, (cityCount.get(city) || 0) + 1);
+    }
+    const topCity = [...cityCount.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || "--";
+    const bestRow = state.liveRows
+      .filter((r) => !r.error && Number.isFinite(Number(r.observed_price ?? r.value)))
+      .sort((a, b) => Number(a.observed_price ?? a.value) - Number(b.observed_price ?? b.value))[0];
+
+    byId("metric-top-item").textContent = topItem;
+    byId("metric-top-city").textContent = topCity;
+    byId("metric-best-item").textContent = bestRow
+      ? `${bestRow.item_name || bestRow.queryText} @ ${bestRow.observed_price ?? bestRow.value}`
+      : "--";
+  } else {
+    byId("metric-top-item").textContent = "--";
+    byId("metric-top-city").textContent = "--";
+    byId("metric-best-item").textContent = "--";
+  }
+}
+
 function renderLiveRows() {
   const body = byId("live-prices-body");
-  if (!body) return;
-  body.innerHTML = "";
-  for (const row of state.liveRows) {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
+  if (body) {
+    body.innerHTML = "";
+    for (const row of state.liveRows) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
       <td>${formatRowTime(row.timestamp)}</td>
       <td>${row.city || "-"}</td>
       <td>${row.category || "-"}</td>
       <td>${row.item_name || row.queryText || "-"}</td>
       <td>${row.observed_price ?? row.value ?? "--"}</td>
-      <td>${row.confidence ?? "--"}</td>
+    `;
+      body.appendChild(tr);
+    }
+  }
+
+  const dashBody = byId("dashboard-live-body");
+  if (dashBody) {
+    dashBody.innerHTML = "";
+    for (const row of state.liveRows.slice(0, 12)) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+      <td>${formatRowTime(row.timestamp)}</td>
+      <td>${row.city || "-"}</td>
+      <td>${row.item_name || row.queryText || "-"}</td>
+      <td>${row.observed_price ?? row.value ?? "--"}</td>
       <td>${row.error || ""}</td>
     `;
-    body.appendChild(tr);
+      dashBody.appendChild(tr);
+    }
   }
+  renderDashboardStats();
 }
 
 function renderHistoryRows() {
   const body = byId("history-prices-body");
-  if (!body) return;
+  if (!body) {
+    renderDashboardStats();
+    return;
+  }
   body.innerHTML = "";
   for (const row of state.historyRows) {
     const tr = document.createElement("tr");
@@ -286,6 +345,85 @@ function renderHistoryRows() {
     `;
     body.appendChild(tr);
   }
+  renderDashboardStats();
+}
+
+function marketRowStatusClass(row) {
+  if (row.status === "posted") return "posted";
+  if (row.status === "failed") return "failed";
+  if (!Number.isFinite(Number(row.finalPrice)) || Number(row.finalPrice) <= 0) return "invalid";
+  return "pending";
+}
+
+function renderMarketPriceSummary() {
+  const node = byId("market-review-summary");
+  if (!node) return;
+  const total = state.marketPriceRows.length;
+  const posted = state.marketPriceRows.filter((row) => row.status === "posted").length;
+  const failed = state.marketPriceRows.filter((row) => row.status === "failed").length;
+  const pending = total - posted - failed;
+  if (total === 0) {
+    node.textContent = "No rows yet.";
+    return;
+  }
+  node.textContent = `Rows: ${total} · Pending: ${pending} · Posted: ${posted} · Failed: ${failed}`;
+}
+
+function renderMarketPriceRows() {
+  const body = byId("market-price-body");
+  if (!body) return;
+  body.innerHTML = "";
+  for (const row of state.marketPriceRows) {
+    const tr = document.createElement("tr");
+    const statusClass = marketRowStatusClass(row);
+    tr.innerHTML = `
+      <td>${formatRowTime(row.timestamp)}</td>
+      <td>${row.city || "-"}</td>
+      <td>${row.category || "-"}</td>
+      <td>${row.item_name || row.queryText || "-"}</td>
+      <td>${row.tier ?? "-"}</td>
+      <td>${row.enchant ?? 0}</td>
+      <td>${row.ocrPrice ?? "--"}</td>
+      <td>
+        <input
+          class="price-input"
+          type="number"
+          min="1"
+          step="1"
+          value="${row.finalPrice ?? ""}"
+          data-action="edit-final"
+          data-row-id="${row.id}"
+        />
+      </td>
+      <td><span class="status-badge ${statusClass}">${row.statusLabel || row.status || "pending"}</span></td>
+      <td class="row-actions">
+        <button class="btn-secondary" data-action="revert-row" data-row-id="${row.id}">Revert</button>
+        <button class="btn-danger" data-action="delete-row" data-row-id="${row.id}">Delete</button>
+      </td>
+    `;
+    body.appendChild(tr);
+  }
+  renderMarketPriceSummary();
+}
+
+function appendMarketReviewRowFromScan(payload, scan) {
+  const row = {
+    id: `mpr-${Date.now()}-${++state.marketRowCounter}`,
+    timestamp: scan.timestamp,
+    city: payload.city || "",
+    category: payload.categoryId || "",
+    item_name: scan.queryText || payload.item?.name || "",
+    item_id: payload.item?.id || "",
+    tier: payload.item?.tier ?? null,
+    enchant: payload.item?.enchant ?? 0,
+    ocrPrice: scan.value ?? null,
+    finalPrice: scan.value ?? null,
+    error: scan.error || "",
+    status: "pending",
+    statusLabel: scan.error ? "Failed OCR" : "Pending",
+  };
+  state.marketPriceRows.unshift(row);
+  renderMarketPriceRows();
 }
 
 async function refreshWatchlist() {
@@ -298,10 +436,7 @@ async function refreshCalibrationState() {
     const snapshot = await request("getState");
     state.searchPoint = snapshot.searchPoint || null;
     state.region = snapshot.region || null;
-    state.draftSearchPoint = null;
-    state.draftRegion = null;
     renderCalibrationStatus();
-    renderCalibrationDraftStatus();
   } catch (error) {
     logLine(`Failed to load calibration state: ${error.message}`);
   }
@@ -391,6 +526,7 @@ function renderCatalogAccordion() {
       btn.title = `${it.id}\nQuality (Normal-Masterpiece) is selected in market UI.`;
       btn.addEventListener("click", () => {
         byId("input-watch-query").value = it.name;
+        setActiveView("items");
         logLine(`Filled query from catalog: ${it.name}`);
       });
       wrap.appendChild(btn);
@@ -430,12 +566,7 @@ function collectItemsForCategory(categoryId) {
   };
   return allItems
     .filter((item) => (item.exactCategoryId || inferCategoryFromId(item.id)) === categoryId)
-    .map((item) => ({
-      id: item.id,
-      name: item.name,
-      tier: item.tier,
-      enchant: item.enchant,
-    }));
+    .map((item) => ({ id: item.id, name: item.name, tier: item.tier, enchant: item.enchant }));
 }
 
 async function loadPriceHistory() {
@@ -450,6 +581,12 @@ async function loadPriceHistory() {
 
 function openStartFetchFlow() {
   if (state.isCategoryFetchRunning) return;
+  if (state.selectedCity) {
+    startCategoryFetchWithCity(state.selectedCity).catch((error) => {
+      logLine(`Category fetch failed: ${error.message}`);
+    });
+    return;
+  }
   openFetchCityModal();
 }
 
@@ -469,7 +606,6 @@ async function startCategoryFetchWithCity(city) {
   const categoryMeta = EXACT_CATEGORY_ORDER.find((c) => c.id === categoryId);
   let items = collectItemsForCategory(categoryId);
   if (items.length === 0) {
-    // Auto-recover from stale cached catalog schema.
     await loadItemCatalog(true);
     items = collectItemsForCategory(categoryId);
   }
@@ -488,8 +624,10 @@ async function startCategoryFetchWithCity(city) {
     city: marketCity,
   };
   renderCategoryProgress();
+  setActiveView("check");
   await window.botApi.setWindowProgress(0);
   await window.botApi.minimizeWindow();
+  await sleep(350);
   logLine(
     `Starting category fetch: ${categoryMeta?.label || categoryId} @ ${marketCity} (${items.length} items)`,
   );
@@ -507,36 +645,67 @@ async function startCategoryFetchWithCity(city) {
   }
 }
 
-function wireTabs() {
-  document.querySelectorAll(".tab-btn").forEach((btn) => {
-    btn.addEventListener("click", () => setActiveTab(btn.dataset.tab));
+function loadUiPrefs() {
+  try {
+    const raw = localStorage.getItem(UI_PREFS_KEY);
+    if (!raw) return;
+    const prefs = JSON.parse(raw);
+    if (prefs.writeMs != null) byId("setting-write-ms").value = prefs.writeMs;
+    if (prefs.clickMs != null) byId("setting-click-ms").value = prefs.clickMs;
+    if (prefs.listenMs != null) byId("setting-listen-ms").value = prefs.listenMs;
+  } catch (_error) {
+    // ignore corrupted local prefs
+  }
+}
+
+function saveUiPrefs() {
+  const prefs = {
+    writeMs: toNumber(byId("setting-write-ms")?.value, 100),
+    clickMs: toNumber(byId("setting-click-ms")?.value, 100),
+    listenMs: toNumber(byId("setting-listen-ms")?.value, 300),
+  };
+  localStorage.setItem(UI_PREFS_KEY, JSON.stringify(prefs));
+  logLine("Settings saved locally.");
+}
+
+function resetUiPrefs() {
+  localStorage.removeItem(UI_PREFS_KEY);
+  byId("setting-write-ms").value = 100;
+  byId("setting-click-ms").value = 100;
+  byId("setting-listen-ms").value = 300;
+  logLine("Settings reset to defaults.");
+}
+
+function wireNavigation() {
+  document.querySelectorAll(".nav-item").forEach((btn) => {
+    btn.addEventListener("click", () => setActiveView(btn.dataset.view));
   });
 }
 
 function wireActions() {
-  byId("input-watch-filter").addEventListener("input", (event) => {
+  byId("input-watch-filter")?.addEventListener("input", (event) => {
     state.watchFilter = event.target.value;
     renderWatchlist();
   });
 
   const catalogFilterInput = byId("input-catalog-filter");
-  catalogFilterInput.addEventListener("input", (event) => {
+  catalogFilterInput?.addEventListener("input", (event) => {
     state.catalogFilter = event.target.value;
     clearTimeout(catalogFilterDebounce);
     catalogFilterDebounce = setTimeout(() => renderCatalogAccordion(), 140);
   });
 
-  byId("btn-catalog-clear").addEventListener("click", () => {
+  byId("btn-catalog-clear")?.addEventListener("click", () => {
     state.catalogFilter = "";
     catalogFilterInput.value = "";
     renderCatalogAccordion();
   });
 
-  byId("btn-catalog-refresh").addEventListener("click", async () => {
+  byId("btn-catalog-refresh")?.addEventListener("click", async () => {
     await loadItemCatalog(true);
   });
 
-  byId("btn-watch-add").addEventListener("click", async () => {
+  byId("btn-watch-add")?.addEventListener("click", async () => {
     const queryText = byId("input-watch-query").value.trim();
     if (!queryText) {
       logLine("Watch item query is required.");
@@ -546,7 +715,7 @@ function wireActions() {
     await request("addWatchItem", {
       queryText,
       targetPrice: targetRaw ? Number(targetRaw) : null,
-      minProfitPct: parseNumberInput("input-watch-profit", 5),
+      minProfitPct: toNumber(byId("input-watch-profit").value, 5),
       tags: [],
     });
     byId("input-watch-query").value = "";
@@ -554,107 +723,187 @@ function wireActions() {
     logLine("Watch item added");
   });
 
-  byId("btn-start-category-fetch").addEventListener("click", openStartFetchFlow);
-  byId("btn-fetch-city-confirm").addEventListener("click", async () => {
+  byId("btn-start-category-fetch")?.addEventListener("click", openStartFetchFlow);
+  byId("city-chip-list")?.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    const city = target.dataset.city;
+    if (!city) return;
+    setSelectedCity(city);
+    logLine(`Selected city: ${city}`);
+  });
+  byId("btn-fetch-city-confirm")?.addEventListener("click", async () => {
     const sel = byId("select-fetch-city");
     const city = sel?.value?.trim() || "";
     if (!city) {
       logLine("Select a city.");
       return;
     }
-    localStorage.setItem(FETCH_CITY_STORAGE_KEY, city);
+    setSelectedCity(city);
     setFetchCityModalVisible(false);
     await startCategoryFetchWithCity(city);
   });
-  byId("btn-fetch-city-close").addEventListener("click", () => setFetchCityModalVisible(false));
+  byId("btn-fetch-city-close")?.addEventListener("click", () => setFetchCityModalVisible(false));
   byId("fetch-city-modal")?.addEventListener("click", (event) => {
     if (event.target.id === "fetch-city-modal") {
       setFetchCityModalVisible(false);
     }
   });
-  byId("btn-stop-category-fetch").addEventListener("click", async () => {
+
+  byId("btn-stop-category-fetch")?.addEventListener("click", async () => {
     await window.botApi.stopCategoryScan();
     logLine("Stop requested. Waiting for current item to finish.");
   });
-  byId("btn-capture-search-point").addEventListener("click", async () => {
+
+  byId("btn-capture-search-point")?.addEventListener("click", async () => {
     logLine("Pick mode: click the exact market search box point (Esc to cancel).");
     const point = await request("selectPoint");
     if (!point) {
       logLine("Search point selection cancelled.");
       return;
     }
-    state.draftSearchPoint = point;
-    renderCalibrationDraftStatus();
-    logLine(`Search point picked (draft): ${point.x},${point.y}`);
-  });
-  byId("btn-save-search-point").addEventListener("click", async () => {
-    if (!state.draftSearchPoint) {
-      logLine("No pending Search Point to save.");
-      return;
-    }
-    await request("setSearchPoint", state.draftSearchPoint);
-    state.searchPoint = state.draftSearchPoint;
-    state.draftSearchPoint = null;
+    await request("setSearchPoint", point);
+    state.searchPoint = point;
     renderCalibrationStatus();
-    renderCalibrationDraftStatus();
-    logLine(`Search point saved: ${state.searchPoint.x},${state.searchPoint.y}`);
+    logLine(`Search point set: ${state.searchPoint.x},${state.searchPoint.y}`);
   });
-  byId("btn-draw-price-region").addEventListener("click", async () => {
+
+  byId("btn-draw-price-region")?.addEventListener("click", async () => {
     const region = await request("selectRegion");
     if (!region) {
       logLine("Price region selection cancelled.");
       return;
     }
-    state.draftRegion = region;
-    renderCalibrationDraftStatus();
-    logLine(`Price region drawn (draft): ${region.width}x${region.height}`);
-  });
-  byId("btn-save-price-region").addEventListener("click", async () => {
-    if (!state.draftRegion) {
-      logLine("No pending OCR region to save.");
-      return;
-    }
-    await request("setRegion", state.draftRegion);
-    state.region = state.draftRegion;
-    state.draftRegion = null;
+    await request("setRegion", region);
+    state.region = region;
     renderCalibrationStatus();
-    renderCalibrationDraftStatus();
-    logLine(`Price region saved: ${state.region.width}x${state.region.height}`);
+    logLine(`Price region set: ${state.region.width}x${state.region.height}`);
   });
-  byId("btn-refresh-history").addEventListener("click", loadPriceHistory);
-  byId("btn-clear-live-rows").addEventListener("click", () => {
+
+  byId("btn-clear-live-rows")?.addEventListener("click", () => {
     state.liveRows = [];
     renderLiveRows();
   });
 
-  byId("btn-help").addEventListener("click", () => {
+  byId("market-price-body")?.addEventListener("input", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement)) return;
+    if (target.dataset.action !== "edit-final") return;
+    const row = state.marketPriceRows.find((entry) => entry.id === target.dataset.rowId);
+    if (!row) return;
+    const price = Number(target.value);
+    row.finalPrice = Number.isFinite(price) ? Math.round(price) : null;
+    if (row.status !== "posted") {
+      row.status = "pending";
+      row.statusLabel = Number.isFinite(row.finalPrice) && row.finalPrice > 0 ? "Pending" : "Invalid Price";
+    }
+    renderMarketPriceRows();
+  });
+
+  byId("market-price-body")?.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    const action = target.dataset.action;
+    const rowId = target.dataset.rowId;
+    if (!action || !rowId) return;
+    const row = state.marketPriceRows.find((entry) => entry.id === rowId);
+    if (!row) return;
+    if (action === "revert-row") {
+      row.finalPrice = row.ocrPrice;
+      if (row.status !== "posted") {
+        row.status = "pending";
+        row.statusLabel = Number.isFinite(Number(row.finalPrice)) && Number(row.finalPrice) > 0
+          ? "Pending"
+          : "Invalid Price";
+      }
+      renderMarketPriceRows();
+      return;
+    }
+    if (action === "delete-row") {
+      state.marketPriceRows = state.marketPriceRows.filter((entry) => entry.id !== rowId);
+      renderMarketPriceRows();
+    }
+  });
+
+  byId("btn-market-clear-posted")?.addEventListener("click", () => {
+    state.marketPriceRows = state.marketPriceRows.filter((row) => row.status !== "posted");
+    renderMarketPriceRows();
+    logLine("Cleared posted market review rows.");
+  });
+
+  byId("btn-market-post-all")?.addEventListener("click", async () => {
+    const rowsToPost = state.marketPriceRows.filter((row) => {
+      const validPrice = Number.isFinite(Number(row.finalPrice)) && Number(row.finalPrice) > 0;
+      return row.status !== "posted" && validPrice && row.item_id && row.city;
+    });
+    if (rowsToPost.length === 0) {
+      logLine("No valid pending rows to post.");
+      return;
+    }
+    logLine(`Posting ${rowsToPost.length} reviewed rows to Supabase...`);
+    const payload = rowsToPost.map((row) => ({
+      rowId: row.id,
+      itemUniqueName: row.item_id,
+      itemName: row.item_name || row.item_id,
+      tier: row.tier,
+      enchant: row.enchant || 0,
+      city: row.city,
+      price: Number(row.finalPrice),
+      postedAt: row.timestamp,
+    }));
+    try {
+      const response = await request("postReviewedPrices", { rows: payload });
+      const byIdMap = new Map((response.results || []).map((result) => [result.rowId, result]));
+      state.marketPriceRows = state.marketPriceRows.map((row) => {
+        const result = byIdMap.get(row.id);
+        if (!result) return row;
+        if (result.ok) {
+          return { ...row, status: "posted", statusLabel: "Posted" };
+        }
+        return { ...row, status: "failed", statusLabel: `Failed: ${result.error || "unknown"}` };
+      });
+      renderMarketPriceRows();
+      logLine(`Supabase post complete. OK=${response.posted || 0}, Failed=${response.failed || 0}`);
+    } catch (error) {
+      logLine(`Supabase post failed: ${error.message}`);
+    }
+  });
+
+  byId("btn-help")?.addEventListener("click", () => {
     const hidden = byId("help-modal").classList.contains("is-hidden");
     setHelpVisible(hidden);
   });
-  byId("btn-help-close").addEventListener("click", () => setHelpVisible(false));
-  byId("help-modal").addEventListener("click", (event) => {
+  byId("btn-help-close")?.addEventListener("click", () => setHelpVisible(false));
+  byId("help-modal")?.addEventListener("click", (event) => {
     if (event.target.id === "help-modal") {
       setHelpVisible(false);
     }
   });
+
+  byId("btn-save-settings")?.addEventListener("click", saveUiPrefs);
+  byId("btn-reset-settings")?.addEventListener("click", resetUiPrefs);
 
   document.addEventListener("keydown", (event) => {
     if (!(event.ctrlKey && event.shiftKey)) return;
     const key = event.key.toLowerCase();
     if (key === "f") {
       event.preventDefault();
+      setActiveView("check");
       openStartFetchFlow();
     } else if (key === "s") {
       event.preventDefault();
-      window.botApi.stopCategoryScan().then(() => {
-        logLine("Stop requested by shortcut.");
-      }).catch((error) => logLine(`Stop request failed: ${error.message}`));
+      window.botApi
+        .stopCategoryScan()
+        .then(() => {
+          logLine("Stop requested by shortcut.");
+        })
+        .catch((error) => logLine(`Stop request failed: ${error.message}`));
     } else if (key === "1") {
       event.preventDefault();
-      setActiveTab("items");
+      setActiveView("items");
     } else if (key === "2") {
       event.preventDefault();
-      setActiveTab("prices");
+      setActiveView("check");
     } else if (key === "h") {
       event.preventDefault();
       const hidden = byId("help-modal").classList.contains("is-hidden");
@@ -707,6 +956,7 @@ function wireEvents() {
         city: payload.city || state.categoryProgress.city,
       };
       renderLiveRows();
+      appendMarketReviewRowFromScan(payload, scan);
       renderCategoryProgress();
       const total = Number(payload.totalItems || 0);
       const done = Number(payload.index || 0);
@@ -728,6 +978,7 @@ function wireEvents() {
       renderCategoryProgress();
       window.botApi.setWindowProgress(-1).catch(() => {});
       window.botApi.restoreWindow().catch(() => {});
+      window.botApi.closeStatusWindow().catch(() => {});
       loadPriceHistory().catch(() => {});
       logLine(
         `Category fetch ${payload.cancelled ? "stopped" : "done"}: processed=${payload.processed ?? 0}, failures=${payload.failures ?? 0}`,
@@ -747,19 +998,23 @@ function wireEvents() {
 
 async function bootstrap() {
   setBackendStatus("Connected");
-  wireTabs();
+  wireNavigation();
   wireActions();
   wireEvents();
+  loadUiPrefs();
   renderCategorySelector();
   renderFetchCityOptions();
+  setSelectedCity(localStorage.getItem(FETCH_CITY_STORAGE_KEY) || MARKET_CITIES[0]);
+  renderCityChips();
   renderCalibrationStatus();
-  renderCalibrationDraftStatus();
   renderCategoryProgress();
   await loadItemCatalog(false);
   await refreshWatchlist();
   await refreshCalibrationState();
   await loadPriceHistory();
   renderLiveRows();
+  renderMarketPriceRows();
+  setActiveView("dashboard");
   logLine("Items console ready");
 }
 

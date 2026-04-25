@@ -37,20 +37,20 @@ class RegionSelector(QWidget):
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
-            self._start_point = event.position().toPoint()
+            self._start_point = event.globalPosition().toPoint()
             self._end_point = self._start_point
             self._is_dragging = True
             self.update()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if self._is_dragging:
-            self._end_point = event.position().toPoint()
+            self._end_point = event.globalPosition().toPoint()
             self.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() != Qt.MouseButton.LeftButton:
             return
-        self._end_point = event.position().toPoint()
+        self._end_point = event.globalPosition().toPoint()
         self._is_dragging = False
         rect = QRect(self._start_point, self._end_point).normalized()
         region = None

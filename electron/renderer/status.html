@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'" />
+    <title>SoCaRi Market Bot - Market Check</title>
+    <link rel="stylesheet" href="./status.css" />
+  </head>
+  <body>
+    <div class="status-shell">
+      <header class="status-head">
+        <button type="button" class="pin-btn" id="btn-pin" title="Toggle always on top">📌</button>
+        <div class="status-titles">
+          <h1 id="status-title">SoCaRi Market Bot</h1>
+          <p id="status-sub" class="status-sub">—</p>
+        </div>
+        <button type="button" class="close-btn" id="btn-close" title="Close (scan continues)">×</button>
+      </header>
+
+      <div class="progress-wrap" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progress-wrap">
+        <div class="progress-fill" id="progress-fill"></div>
+        <span class="progress-label" id="progress-label">0 / 0</span>
+      </div>
+
+      <p class="current-line" id="current-line">&gt; —</p>
+      <p class="current-line current-price" id="current-price">Price: --</p>
+
+      <footer class="hotkeys">
+        <span><kbd>F1</kbd> Pause / Resume</span>
+        <span><kbd>F2</kbd> Skip delay</span>
+        <span><kbd>F5</kbd> Stop scan</span>
+      </footer>
+    </div>
+    <script src="./status.js"></script>
+  </body>
+</html>

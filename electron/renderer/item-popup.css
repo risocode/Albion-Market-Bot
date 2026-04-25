@@ -1,0 +1,42 @@
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  height: 100%;
+  font-family: "Segoe UI", Tahoma, sans-serif;
+  background: #151a24;
+  color: #d8deea;
+}
+.popup-shell {
+  height: 100%;
+  border: 1px solid #33415a;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #1f2635, #1a202d);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+}
+.item-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.item-name {
+  font-size: 19px;
+  color: #edf2ff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.item-price {
+  color: #78a9ff;
+  font-weight: 700;
+  font-size: 28px;
+}
+.item-sub {
+  margin: 0;
+  color: #9aa7c2;
+  font-size: 12px;
+}

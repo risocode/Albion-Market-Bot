@@ -1,0 +1,131 @@
+﻿* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  height: 100%;
+  font-family: "Segoe UI", Tahoma, sans-serif;
+  color: #d8deea;
+  background: #1f2430;
+  -webkit-app-region: drag;
+}
+.status-shell {
+  height: 100%;
+  padding: 9px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid #3a4255;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #272f3f, #222838);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.45);
+}
+.status-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  -webkit-app-region: drag;
+}
+.pin-btn,
+.close-btn {
+  -webkit-app-region: no-drag;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid #3f4960;
+  background: #293245;
+  color: #d7b8ff;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0;
+  flex-shrink: 0;
+}
+.close-btn {
+  margin-left: auto;
+  color: #b7c1d6;
+  font-size: 20px;
+}
+.pin-btn:hover,
+.close-btn:hover {
+  filter: brightness(1.1);
+}
+.status-titles { flex: 1; min-width: 0; }
+.status-titles h1 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #f1d0ff;
+}
+.status-sub {
+  margin: 2px 0 0;
+  font-size: 11px;
+  color: #9ca6bc;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.progress-wrap {
+  position: relative;
+  height: 30px;
+  border-radius: 10px;
+  background: #171b26;
+  border: 1px solid #3c475d;
+  overflow: hidden;
+  -webkit-app-region: no-drag;
+}
+.progress-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0%;
+  max-width: 100%;
+  background: linear-gradient(90deg, #4d7eff, #6ba8ff, #78c2ff);
+  transition: width 0.2s ease;
+}
+.progress-label {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  font-size: 12px;
+  font-weight: 700;
+  color: #f0f4ff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+}
+.current-line {
+  margin: 0;
+  font-size: 13px;
+  font-family: Consolas, "Cascadia Mono", monospace;
+  color: #bfcbe2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  -webkit-app-region: no-drag;
+}
+.current-line.is-paused {
+  color: #ffca7a;
+}
+.current-price {
+  color: #95baff;
+  font-weight: 600;
+}
+.hotkeys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  font-size: 10px;
+  color: #7f89a1;
+  margin-top: auto;
+  -webkit-app-region: no-drag;
+}
+.hotkeys kbd {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid #3f4960;
+  background: #1c2230;
+  color: #d0daf0;
+  font-size: 10px;
+  font-family: inherit;
+}

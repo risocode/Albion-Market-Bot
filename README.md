@@ -1,4 +1,4 @@
-# Albion Bot Foundation (Windows)
+# SoCaRi Market Bot Foundation (Windows)
 
 Desktop automation foundation for:
 - Transparent overlay
@@ -57,10 +57,8 @@ albion-bot-service
 npm run electron:dev
 ```
 
-### One-click launcher (normal app-style)
-- Double-click `Start Albion Bot Dashboard.vbs` (hidden console), or
-- Double-click `Start Albion Bot Dashboard.bat` (shows startup logs).
-- Launcher auto-closes old bot/electron processes, ensures dependencies, then opens dashboard.
+### One-click launcher (app-style)
+- Double-click `Start Albion Bot Dashboard.vbs` to launch as a GUI app (no `cmd` window).
 
 ## Hotkeys (Default)
 

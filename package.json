@@ -1,14 +1,69 @@
 {
-  "name": "albion-bot-electron-ui",
-  "version": "0.1.0",
+  "name": "socari-market-bot-electron-ui",
+  "version": "0.1.4",
   "private": true,
-  "description": "Electron dashboard for Albion bot automation backend.",
+  "description": "Electron dashboard for SoCaRi Market Bot automation backend.",
   "main": "electron/main.js",
   "scripts": {
     "electron:dev": "electron ./electron/main.js",
-    "electron:build": "echo \"Packaging not configured yet\""
+    "electron:build": "electron-builder --dir",
+    "build:win": "electron-builder --win nsis",
+    "build:portable": "electron-builder --win portable",
+    "build:win:versioned": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-win-versioned.ps1"
+  },
+  "build": {
+    "appId": "com.socari.marketbot",
+    "productName": "SoCaRi Market Bot",
+    "asar": false,
+    "files": [
+      "electron/**/*",
+      "src/**/*",
+      "pyproject.toml",
+      "README.md",
+      "watchlist.json",
+      "calibration_profile.json",
+      "market_prices_log.csv",
+      "capture_log.csv",
+      "recommendations_log.csv",
+      "!**/__pycache__/**",
+      "!**/.pytest_cache/**",
+      "!**/.electron-user-data/**",
+      "!tests/**",
+      "!assets/**",
+      "!.git/**"
+    ],
+    "extraResources": [
+      {
+        "from": ".venv",
+        "to": "backend/.venv",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "SoCaRi-Market-Bot-${version}-Setup-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
   },
   "devDependencies": {
-    "electron": "^36.3.2"
+    "electron": "^36.3.2",
+    "electron-builder": "^24.13.3"
   }
 }
