@@ -438,13 +438,23 @@ class BotService:
         normalized_items = self._apply_category_tier_filter(category_id=category, items=normalized_items)
         if not normalized_items:
             raise ValueError("No items left after tier filter.")
-        normalized_items.sort(
-            key=lambda item: (
-                item.get("base_name", ""),
-                item.get("tier") if item.get("tier") is not None else 999,
-                item.get("enchant", 0),
+        if category == "all":
+            normalized_items.sort(
+                key=lambda item: (
+                    self._category_rank_for_all(item.get("id")),
+                    item.get("base_name", ""),
+                    item.get("tier") if item.get("tier") is not None else 999,
+                    item.get("enchant", 0),
+                )
             )
-        )
+        else:
+            normalized_items.sort(
+                key=lambda item: (
+                    item.get("base_name", ""),
+                    item.get("tier") if item.get("tier") is not None else 999,
+                    item.get("enchant", 0),
+                )
+            )
 
         scan_id = utc_now_iso()
         self._write_category_scan_checkpoint(
@@ -666,6 +676,13 @@ class BotService:
                     tier=item.get("tier"),
                     enchant=item.get("enchant", 0),
                 )
+                self._emit_event(
+                    "log",
+                    {"level": "info", "message": f"Category query[{idx}/{len(normalized_items)}]: {query_text}"},
+                )
+                item_category = category
+                if category == "all":
+                    item_category = self._infer_category_id_from_unique_name(item.get("id"))
                 scan_result = None
                 anchor_failed = False
                 for anchor_try in range(1, self._search_anchor_retry_limit + 1):
@@ -745,12 +762,12 @@ class BotService:
                     consecutive_no_data = 0
                 else:
                     consecutive_no_data += 1
-                self._append_market_price_row(category, city, item, scan_result)
+                self._append_market_price_row(item_category, city, item, scan_result)
                 processed += 1
                 self._emit_event(
                     "categoryScanItem",
                     {
-                        "categoryId": category,
+                        "categoryId": item_category,
                         "city": city,
                         "index": idx,
                         "totalItems": len(normalized_items),
@@ -1020,7 +1037,8 @@ class BotService:
                 self._market.run_once(search_point, query_text)
                 image_path = self._capture.capture_region(region, self._settings.temp_image_path)
                 raw_text = self._ocr.extract_text(image_path)
-                value = normalize_numeric_text(raw_text)
+                value_text = normalize_numeric_text(raw_text)
+                value = self._parse_formatted_numeric(value_text)
                 return ScanResult(
                     item_id=item_id,
                     query_text=query_text,
@@ -1063,6 +1081,18 @@ class BotService:
             return 0.2
         confidence = 0.45 + min(0.5, digits * 0.07)
         return round(min(1.0, confidence), 3)
+
+    @staticmethod
+    def _parse_formatted_numeric(text: str | None) -> int | None:
+        if text is None:
+            return None
+        digits = "".join(ch for ch in str(text) if ch.isdigit())
+        if not digits:
+            return None
+        try:
+            return int(digits)
+        except ValueError:
+            return None
 
     def _acquire_single_flight(self, operation: str) -> None:
         with self._single_flight_lock:
@@ -1291,10 +1321,34 @@ class BotService:
 
     @staticmethod
     def _build_market_query_text(item_name: str, tier: int | None, enchant: int) -> str:
-        base_name = BotService._strip_item_tier_prefix(item_name)
+        base_name = BotService._ensure_tier_named_item(str(item_name or "").strip(), tier)
         if tier is None:
             return base_name
         return f"{base_name} {tier}.{max(0, int(enchant))}"
+
+    @staticmethod
+    def _ensure_tier_named_item(item_name: str, tier: int | None) -> str:
+        """Ensure market query includes tier adjective when tier is known."""
+        cleaned = str(item_name or "").strip()
+        if not cleaned or tier is None:
+            return cleaned
+        # If title already starts with known tier word, keep it.
+        if re.match(
+            r"^(?:Novice|Journeyman|Adept|Expert|Master|Grandmaster|Elder)(?:'s)?\s+",
+            cleaned,
+            flags=re.IGNORECASE,
+        ):
+            return cleaned
+        prefix_by_tier = {
+            3: "Journeyman's",
+            4: "Adept's",
+            5: "Expert's",
+            6: "Master's",
+            7: "Grandmaster's",
+            8: "Elder's",
+        }
+        prefix = prefix_by_tier.get(int(tier))
+        return f"{prefix} {cleaned}" if prefix else cleaned
 
     @staticmethod
     def _strip_item_tier_prefix(item_name: str) -> str:
@@ -1338,6 +1392,67 @@ class BotService:
         if category_id not in min_tier_categories:
             return items
         return [item for item in items if item.get("tier") is None or int(item["tier"]) >= 4]
+
+    @staticmethod
+    def _infer_category_id_from_unique_name(unique_name: str | None) -> str:
+        u = str(unique_name or "").upper()
+        if (
+            "ARTEFACT" in u
+            or "ARTIFACT" in u
+            or "_RUNE" in u
+            or "_SOUL" in u
+            or "_RELIC" in u
+        ):
+            return "artifact"
+        if "_MAIN_" in u or ("_2H_" in u and "_2H_TOOL_" not in u):
+            return "weapons"
+        if "_ARMOR_" in u:
+            return "chest_armor"
+        if "_HEAD_" in u:
+            return "head_armor"
+        if "_SHOES_" in u:
+            return "foot_armor"
+        if "_OFF_" in u:
+            return "off_hands"
+        if "CAPE" in u:
+            return "capes"
+        if re.search(r"^T\d+_BAG", u):
+            return "bags"
+        if "MOUNT" in u:
+            return "mount"
+        if "_TOOL_" in u:
+            return "gathering_equipment"
+        if "FARM" in u or "SEED" in u or "BABY" in u or "MOUNT_GROWN" in u:
+            return "farming"
+        if "FURNITURE" in u or "HOUSE" in u or "TROPHY" in u:
+            return "furniture"
+        if "VANITY" in u or "SKIN" in u:
+            return "vanity"
+        if "MATERIAL" in u or "METALBAR" in u or "PLANK" in u or "CLOTH" in u or "LEATHER" in u:
+            return "crafting"
+        return "consumable"
+
+    @classmethod
+    def _category_rank_for_all(cls, unique_name: str | None) -> int:
+        order = {
+            "weapons": 0,
+            "chest_armor": 1,
+            "head_armor": 2,
+            "foot_armor": 3,
+            "off_hands": 4,
+            "capes": 5,
+            "bags": 6,
+            "mount": 7,
+            "consumable": 8,
+            "gathering_equipment": 9,
+            "crafting": 10,
+            "artifact": 11,
+            "farming": 12,
+            "furniture": 13,
+            "vanity": 14,
+        }
+        cat = cls._infer_category_id_from_unique_name(unique_name)
+        return order.get(cat, 99)
 
     def _ensure_qt_app(self) -> QApplication:
         app = QApplication.instance()

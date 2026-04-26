@@ -1,16 +1,26 @@
-﻿/** Royal + Caerleon + Brecilien — set your character in this city's market before fetching. */
-const MARKET_CITIES = ["Bridgewatch", "Martlock", "Thetford", "Fort Sterling", "Lymhurst", "Caerleon", "Brecilien"];
+﻿/** Royal + Caerleon + Brecilien + Black Market — set your character in this market before fetching. */
+const MARKET_CITIES = ["Bridgewatch", "Martlock", "Thetford", "Fort Sterling", "Lymhurst", "Caerleon", "Brecilien", "Black Market"];
 const FETCH_CITY_STORAGE_KEY = "albionMarketFetchCity";
 const UI_PREFS_KEY = "albionUiPrefs";
 const DB_READ_SCHEDULE_UTC_HOURS = [0, 6, 12, 18]; // Albion UTC time slots
-const AUTO_POST_BATCH_SIZE = 10;
-const AUTO_POST_IDLE_MS = 10000;
-const MARKET_REVIEW_STATE_KEY = "albionMarketReviewState";
-const MARKET_FILTER_DEBOUNCE_MS = 220;
-const MARKET_DB_FETCH_LIMIT = 2000;
+
+const MARKET_FLIP_CATEGORY_ID = "market_flip";
+const FLIP_TIERS = [4, 5, 6, 7, 8];
+const FLIP_ENCHANTS = [0, 1, 2, 3, 4];
+
+function createInitialMarketFlip() {
+  return {
+    active: false,
+    phase: "idle",
+    cityA: "",
+    cityB: "",
+    baseItems: [],
+    prices: new Map(),
+    resultRows: [],
+  };
+}
 
 const EXACT_CATEGORY_ORDER = [
-  { id: "all", label: "All Items" },
   { id: "weapons", label: "Weapons" },
   { id: "chest_armor", label: "Chest Armor" },
   { id: "head_armor", label: "Head Armor" },
@@ -26,6 +36,7 @@ const EXACT_CATEGORY_ORDER = [
   { id: "farming", label: "Farming" },
   { id: "furniture", label: "Furniture" },
   { id: "vanity", label: "Vanity" },
+  { id: "all", label: "All Items" },
 ];
 
 const state = {
@@ -34,6 +45,7 @@ const state = {
   watchlist: [],
   watchFilter: "",
   catalogFilter: "",
+  flipCatalogFilter: "",
   itemCatalog: null,
   liveRows: [],
   historyRows: [],
@@ -41,27 +53,15 @@ const state = {
   categoryProgress: { done: 0, total: 0, failures: 0, item: "", category: "", city: "" },
   searchPoint: null,
   region: null,
-  marketPriceRows: [],
-  marketRowCounter: 0,
-  isPostingMarketRows: false,
   resumeCheckpoint: null,
-  marketDbRows: [],
-  marketDbFilters: {
-    search: "",
-    category: "",
-    type: "",
-    tier: "",
-    enchant: "",
-    city: "",
-    sort: "last_updated_desc",
-  },
+  marketFlip: createInitialMarketFlip(),
 };
 
 const CATALOG_RENDER_CAP = 400;
 let catalogFilterDebounce = null;
-let autoPostIdleTimer = null;
-let marketFilterDebounce = null;
+let flipCatalogFilterDebounce = null;
 let dbReadScheduleTimer = null;
+let flipBulkEditorDraft = null;
 
 function byId(id) {
   return document.getElementById(id);
@@ -91,8 +91,693 @@ function normalizeDisplayPrice(value) {
   return n > 1 ? Math.round(n) : 0;
 }
 
+function inferTypeFromItemName(itemName) {
+  const text = String(itemName || "").trim();
+  if (!text) return "-";
+  const parts = text.split(/\s+/);
+  if (!parts.length) return "-";
+  if (parts.length >= 2 && parts[0].endsWith("'s")) return parts[1];
+  return parts[0];
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function flipItemKeyFromItem(it) {
+  const id = String(it?.id || "").trim();
+  const tier = it?.tier != null ? String(it.tier) : "";
+  const ench = it?.enchant != null ? String(it.enchant) : "0";
+  return `${id}|${tier}|${ench}`;
+}
+
+function normalizeFlipMatchName(name) {
+  return String(name || "")
+    .toLowerCase()
+    .replace(/[’']/g, "")
+    .replace(/[-_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function flipCanonicalCompositeKey(name, tier, enchant) {
+  const t = tier != null && Number.isFinite(Number(tier)) ? Number(tier) : "";
+  const e = enchant != null && Number.isFinite(Number(enchant)) ? Number(enchant) : 0;
+  return `${normalizeFlipMatchName(name)}|t${t}|e${e}`;
+}
+
+function flipTierEnchantKey(tier, enchant) {
+  return `${Number(tier)}.${Number(enchant)}`;
+}
+
+function parseFlipTierEnchantKey(key) {
+  const [tierText, enchantText] = String(key || "").split(".");
+  return {
+    tier: Number(tierText),
+    enchant: Number(enchantText),
+  };
+}
+
+function extractFlipFamilyName(name) {
+  const raw = String(name || "").trim();
+  if (!raw) return "";
+  return raw.replace(/^[^ ]+'s\s+/i, "").trim() || raw;
+}
+
+function buildFlipBaseFromCatalogItem(item) {
+  const familyName = extractFlipFamilyName(item?.name);
+  const baseKey = familyName.toLowerCase();
+  const variants = [];
+  if (state.itemCatalog?.categories) {
+    const all = state.itemCatalog.categories.flatMap((section) => section.items || []);
+    for (const row of all) {
+      const rowFamily = extractFlipFamilyName(row?.name).toLowerCase();
+      const tier = Number(row?.tier);
+      const enchant = Number(row?.enchant ?? 0);
+      if (rowFamily !== baseKey) continue;
+      if (!FLIP_TIERS.includes(tier) || !FLIP_ENCHANTS.includes(enchant)) continue;
+      variants.push({ id: row.id, name: row.name, tier, enchant });
+    }
+  }
+  variants.sort((a, b) => (a.tier - b.tier) || (a.enchant - b.enchant));
+  const selectedVariantKeys = variants.map((row) => flipTierEnchantKey(row.tier, row.enchant));
+  return {
+    baseKey,
+    familyName,
+    displayName: familyName || item?.name || "Unknown",
+    variants,
+    selectedVariantKeys,
+  };
+}
+
+function getFlipSelectedVariants(baseItems = state.marketFlip.baseItems) {
+  const out = [];
+  for (const base of baseItems || []) {
+    const selected = new Set(base.selectedVariantKeys || []);
+    for (const row of base.variants || []) {
+      const key = flipTierEnchantKey(row.tier, row.enchant);
+      if (selected.has(key)) {
+        out.push({ id: row.id, name: row.name, tier: row.tier, enchant: row.enchant ?? 0 });
+      }
+    }
+  }
+  return out;
+}
+
+function flipItemKeyFromPayload(payload) {
+  const item = payload?.item || {};
+  const id = String(item.id || "").trim();
+  if (id) {
+    const tier = item.tier != null ? String(item.tier) : "";
+    const ench = item.enchant != null ? String(item.enchant) : "0";
+    return `${id}|${tier}|${ench}`;
+  }
+  const qt = String(payload?.scanResult?.queryText || "").trim();
+  return `q:${qt}`;
+}
+
+function marketFlipBlocking() {
+  const mf = state.marketFlip;
+  if (!mf?.active) return false;
+  return mf.phase === "running_1" || mf.phase === "running_2" || mf.phase === "handoff";
+}
+
+function resetMarketFlipSession() {
+  const keptItems = (state.marketFlip.baseItems || []).map((base) => ({
+    ...base,
+    variants: [...(base.variants || [])],
+    selectedVariantKeys: [...(base.selectedVariantKeys || [])],
+  }));
+  state.marketFlip = createInitialMarketFlip();
+  state.marketFlip.baseItems = keptItems;
+  renderMarketFlipChrome();
+  renderMarketFlipItems();
+}
+
+function formatFlipSilver(n) {
+  if (n == null || !Number.isFinite(Number(n))) return "--";
+  return Math.round(Number(n)).toLocaleString();
+}
+
+function renderFlipCitySelectors() {
+  const selectA = byId("select-flip-city-a");
+  const selectB = byId("select-flip-city-b");
+  if (!selectA || !selectB) return;
+  const prevA = selectA.value || state.marketFlip.cityA;
+  const prevB = selectB.value || state.marketFlip.cityB;
+  selectA.innerHTML = "";
+  selectB.innerHTML = "";
+  for (const c of MARKET_CITIES) {
+    const opt = document.createElement("option");
+    opt.value = c;
+    opt.textContent = c;
+    selectA.appendChild(opt);
+    selectB.appendChild(opt.cloneNode(true));
+  }
+  const fallbackA = MARKET_CITIES.includes(state.selectedCity) ? state.selectedCity : MARKET_CITIES[0];
+  const fallbackB = MARKET_CITIES.find((c) => c !== fallbackA) || MARKET_CITIES[0];
+  selectA.value = MARKET_CITIES.includes(prevA) ? prevA : fallbackA;
+  selectB.value = MARKET_CITIES.includes(prevB) ? prevB : fallbackB;
+  if (selectA.value === selectB.value) {
+    const alt = MARKET_CITIES.find((c) => c !== selectA.value);
+    if (alt) selectB.value = alt;
+  }
+}
+
+function renderMarketFlipItems() {
+  const body = byId("flip-items-body");
+  if (!body) return;
+  body.replaceChildren();
+  for (const base of state.marketFlip.baseItems || []) {
+    const selectedKeys = new Set(base.selectedVariantKeys || []);
+    const rows = (base.variants || [])
+      .filter((row) => selectedKeys.has(flipTierEnchantKey(row.tier, row.enchant)))
+      .sort((a, b) => (a.tier - b.tier) || (a.enchant - b.enchant));
+    const tr = document.createElement("tr");
+    const tdName = document.createElement("td");
+    tdName.textContent = base.displayName || "-";
+    const tdSelected = document.createElement("td");
+    if (rows.length) {
+      const details = document.createElement("details");
+      details.className = "flip-selected-details";
+      const summary = document.createElement("summary");
+      summary.textContent = `${rows.length} selected`;
+      details.appendChild(summary);
+      for (const row of rows) {
+        const line = document.createElement("div");
+        line.className = "flip-selected-line";
+        line.textContent = `${row.name} ${row.tier}.${row.enchant}`;
+        details.appendChild(line);
+      }
+      tdSelected.appendChild(details);
+    } else {
+      tdSelected.textContent = "No variants selected";
+      tdSelected.className = "muted-text";
+    }
+    const tdBulk = document.createElement("td");
+    const bulkBtn = document.createElement("button");
+    bulkBtn.type = "button";
+    bulkBtn.className = "btn-secondary";
+    bulkBtn.dataset.flipBulkBase = base.baseKey;
+    bulkBtn.textContent = "Bulk";
+    tdBulk.appendChild(bulkBtn);
+    const tdDelete = document.createElement("td");
+    const deleteBtn = document.createElement("button");
+    deleteBtn.type = "button";
+    deleteBtn.className = "btn-secondary";
+    deleteBtn.dataset.flipRemoveBase = base.baseKey;
+    deleteBtn.textContent = "Delete";
+    tdDelete.appendChild(deleteBtn);
+    tr.appendChild(tdName);
+    tr.appendChild(tdSelected);
+    tr.appendChild(tdBulk);
+    tr.appendChild(tdDelete);
+    body.appendChild(tr);
+  }
+  const selectedVariants = getFlipSelectedVariants();
+  const hint = byId("flip-items-hint");
+  if (hint) {
+    hint.textContent = `${(state.marketFlip.baseItems || []).length} base item(s) · ${selectedVariants.length} variant(s) selected.`;
+  }
+  const checkBtn = byId("btn-flip-check-selected");
+  if (checkBtn) checkBtn.disabled = selectedVariants.length === 0 || state.isCategoryFetchRunning || marketFlipBlocking();
+  renderFlipCatalogAccordion();
+}
+
+function renderFlipCatalogAccordion() {
+  const root = byId("flip-catalog-accordion");
+  const status = byId("flip-catalog-status");
+  if (!root) return;
+  root.replaceChildren();
+  const cat = state.itemCatalog;
+  if (!cat?.categories) {
+    if (status) status.textContent = "Catalog not loaded.";
+    return;
+  }
+  const selectedBaseKeys = new Set((state.marketFlip.baseItems || []).map((it) => it.baseKey));
+  const filt = state.flipCatalogFilter.trim().toLowerCase();
+  let totalShown = 0;
+  const checkCategories = EXACT_CATEGORY_ORDER.filter((c) => c.id !== "all");
+  for (const section of checkCategories) {
+    const sourceItems = collectItemsForCategory(section.id);
+    const items = filt
+      ? sourceItems.filter((it) => {
+          const hay = `${String(it.name || "").toLowerCase()} ${String(it.id || "").toLowerCase()}`;
+          return hay.includes(filt);
+        })
+      : sourceItems;
+    if (!items.length) continue;
+    const unique = new Map();
+    for (const it of items) {
+      const familyName = extractFlipFamilyName(it?.name);
+      const baseKey = familyName.toLowerCase();
+      if (!baseKey || unique.has(baseKey)) continue;
+      unique.set(baseKey, { it, familyName, baseKey });
+    }
+    const uniqueRows = Array.from(unique.values());
+    if (!uniqueRows.length) continue;
+    const details = document.createElement("details");
+    details.className = "catalog-section";
+    if (filt) details.open = true;
+    const summary = document.createElement("summary");
+    const label = document.createElement("span");
+    label.textContent = section.label;
+    summary.appendChild(label);
+    const count = document.createElement("span");
+    count.className = "catalog-count";
+    count.textContent = `${uniqueRows.length}`;
+    summary.appendChild(count);
+    details.appendChild(summary);
+    const wrap = document.createElement("div");
+    wrap.className = "catalog-items";
+    const slice = uniqueRows.slice(0, CATALOG_RENDER_CAP);
+    for (const row of slice) {
+      const it = row.it;
+      const familyName = row.familyName;
+      const baseKey = row.baseKey;
+      const isSelected = selectedBaseKeys.has(baseKey);
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "catalog-item";
+      if (isSelected) btn.classList.add("is-selected");
+      btn.title = isSelected ? "Already selected for Market Flip" : "Click to add to Market Flip";
+      const nameSpan = document.createElement("span");
+      nameSpan.className = "catalog-item-name";
+      nameSpan.textContent = familyName || it.name;
+      btn.appendChild(nameSpan);
+      btn.addEventListener("click", () => {
+        if (selectedBaseKeys.has(baseKey)) return;
+        const base = buildFlipBaseFromCatalogItem(it);
+        state.marketFlip.baseItems.push(base);
+        renderMarketFlipItems();
+        logLine(`Added to Market Flip: ${base.displayName}`);
+      });
+      wrap.appendChild(btn);
+      totalShown += 1;
+    }
+    details.appendChild(wrap);
+    if (uniqueRows.length > CATALOG_RENDER_CAP) {
+      const more = document.createElement("div");
+      more.className = "catalog-more";
+      more.textContent = `... and ${uniqueRows.length - CATALOG_RENDER_CAP} more - refine search`;
+      details.appendChild(more);
+    }
+    root.appendChild(details);
+  }
+  if (status) {
+    status.textContent = filt
+      ? `Showing ${totalShown} catalog matches. Click an item to add.`
+      : "Click an item to add to Market Flip selection.";
+  }
+}
+
+function setFlipBulkModalVisible(visible) {
+  const modal = byId("flip-bulk-modal");
+  if (!modal) return;
+  modal.classList.toggle("is-hidden", !visible);
+}
+
+function renderFlipBulkEditor() {
+  const title = byId("flip-bulk-title");
+  const body = byId("flip-bulk-body");
+  if (!body) return;
+  body.replaceChildren();
+  if (!flipBulkEditorDraft) {
+    if (title) title.textContent = "Bulk Tier/Enchant";
+    return;
+  }
+  if (title) title.textContent = `${flipBulkEditorDraft.displayName} · Tier/Enchant`;
+  for (const tier of FLIP_TIERS) {
+    const row = document.createElement("div");
+    row.className = "flip-bulk-row";
+    const label = document.createElement("span");
+    label.className = "flip-bulk-tier-label";
+    label.textContent = `T${tier}`;
+    row.appendChild(label);
+    const chips = document.createElement("div");
+    chips.className = "flip-bulk-chip-row";
+    for (const enchant of FLIP_ENCHANTS) {
+      const key = flipTierEnchantKey(tier, enchant);
+      const hasVariant = flipBulkEditorDraft.availableKeys.has(key);
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = `flip-chip${flipBulkEditorDraft.selectedKeys.has(key) ? " is-selected" : ""}`;
+      chip.textContent = `${tier}.${enchant}`;
+      chip.disabled = !hasVariant;
+      chip.dataset.flipBulkToggle = key;
+      chips.appendChild(chip);
+    }
+    row.appendChild(chips);
+    body.appendChild(row);
+  }
+}
+
+function openFlipBulkEditor(baseKey) {
+  const base = (state.marketFlip.baseItems || []).find((row) => row.baseKey === baseKey);
+  if (!base) return;
+  flipBulkEditorDraft = {
+    baseKey: base.baseKey,
+    displayName: base.displayName,
+    availableKeys: new Set((base.variants || []).map((row) => flipTierEnchantKey(row.tier, row.enchant))),
+    selectedKeys: new Set(base.selectedVariantKeys || []),
+  };
+  renderFlipBulkEditor();
+  setFlipBulkModalVisible(true);
+}
+
+function closeFlipBulkEditor() {
+  flipBulkEditorDraft = null;
+  setFlipBulkModalVisible(false);
+}
+
+function applyFlipBulkEditor() {
+  if (!flipBulkEditorDraft) return;
+  const base = (state.marketFlip.baseItems || []).find((row) => row.baseKey === flipBulkEditorDraft.baseKey);
+  if (!base) {
+    closeFlipBulkEditor();
+    return;
+  }
+  base.selectedVariantKeys = Array.from(flipBulkEditorDraft.selectedKeys);
+  renderMarketFlipItems();
+  closeFlipBulkEditor();
+}
+
+function renderMarketFlipResultsTable() {
+  const body = byId("flip-results-body");
+  if (!body) return;
+  body.replaceChildren();
+  for (const row of state.marketFlip.resultRows || []) {
+    const tr = document.createElement("tr");
+    const basicCells = [
+      row.name,
+      row.tier != null ? String(row.tier) : "-",
+      String(row.enchant ?? 0),
+      formatFlipSilver(row.cityA),
+      formatFlipSilver(row.cityB),
+    ];
+    for (const text of basicCells) {
+      const td = document.createElement("td");
+      td.textContent = text;
+      tr.appendChild(td);
+    }
+    const tdSetup = document.createElement("td");
+    tdSetup.innerHTML = row.setupHtml || row.notes || "--";
+    tr.appendChild(tdSetup);
+    const tdProfit = document.createElement("td");
+    tdProfit.textContent = formatFlipSilver(row.profit);
+    tdProfit.className = row.profit > 0 ? "flip-profit-good" : row.profit < 0 ? "flip-profit-bad" : "";
+    tr.appendChild(tdProfit);
+    body.appendChild(tr);
+  }
+}
+
+function renderFlipHandoff() {
+  const panel = byId("flip-handoff-panel");
+  const btn = byId("btn-flip-continue-phase2");
+  const mf = state.marketFlip;
+  const show = Boolean(mf.active && mf.phase === "handoff");
+  if (panel) panel.classList.toggle("is-hidden", !show);
+  if (btn) btn.disabled = !show;
+  const nextLab = byId("flip-handoff-next-label");
+  if (nextLab && show) {
+    nextLab.textContent = mf.cityB || "City B";
+  }
+}
+
+function renderMarketFlipChrome() {
+  const mf = state.marketFlip;
+  const st = byId("flip-scan-status");
+  const startBtn = byId("btn-flip-start");
+  const exportBtn = byId("btn-flip-export-live");
+  if (st) {
+    if (!mf.active || mf.phase === "idle") {
+      st.textContent = "Flip: Idle";
+    } else if (mf.phase === "running_1") {
+      st.textContent = `Flip: Scanning City A (${mf.cityA})...`;
+    } else if (mf.phase === "handoff") {
+      st.textContent = "Flip: Open City B market in-game, then click Continue.";
+    } else if (mf.phase === "running_2") {
+      st.textContent = `Flip: Scanning City B (${mf.cityB})...`;
+    } else if (mf.phase === "done") {
+      st.textContent = `Flip: Complete (${mf.resultRows.length} compared items).`;
+    }
+  }
+  if (startBtn) {
+    startBtn.disabled =
+      state.isCategoryFetchRunning || (mf.active && mf.phase !== "idle" && mf.phase !== "done");
+  }
+  if (exportBtn) {
+    exportBtn.disabled = !mf.resultRows?.length || mf.phase !== "done";
+  }
+  renderFlipHandoff();
+  renderMarketFlipResultsTable();
+}
+
+function recordMarketFlipPrice(payload, normalizedScanValue, scan) {
+  const mf = state.marketFlip;
+  if (!mf.active || (mf.phase !== "running_1" && mf.phase !== "running_2")) return;
+  if (payload.categoryId !== MARKET_FLIP_CATEGORY_ID) return;
+  const city = String(payload.city || "").trim();
+  const key = flipItemKeyFromPayload(payload);
+  let slot = mf.prices.get(key);
+  if (!slot) {
+    slot = { cityA: null, cityB: null, errA: "", errB: "" };
+  }
+  const price = normalizedScanValue > 0 ? normalizedScanValue : null;
+  const err = String(scan?.error || "");
+  if (city === mf.cityA) {
+    slot.cityA = price;
+    if (err) slot.errA = err;
+  } else if (city === mf.cityB) {
+    slot.cityB = price;
+    if (err) slot.errB = err;
+  }
+  mf.prices.set(key, slot);
+}
+
+function finalizeMarketFlipResults() {
+  const mf = state.marketFlip;
+  const selectedVariants = getFlipSelectedVariants(mf.baseItems);
+  const rows = [];
+  for (const it of selectedVariants) {
+    const key = flipItemKeyFromItem(it);
+    const slot = mf.prices.get(key) || { cityA: null, cityB: null, errA: "", errB: "" };
+    const priceA = slot.cityA;
+    const priceB = slot.cityB;
+    let setupHtml = "--";
+    let profit = null;
+    if (priceA != null && priceB != null) {
+      if (priceA < priceB) {
+        setupHtml = `<span class="flip-city-a">City A</span> → <span class="flip-city-b">City B</span>`;
+        profit = priceB - priceA;
+      } else if (priceB < priceA) {
+        setupHtml = `<span class="flip-city-a">City B</span> → <span class="flip-city-b">City A</span>`;
+        profit = priceA - priceB;
+      } else {
+        setupHtml = "Same price";
+        profit = 0;
+      }
+    }
+    const notes = [slot.errA && `City A: ${slot.errA}`, slot.errB && `City B: ${slot.errB}`]
+      .filter(Boolean)
+      .join("; ");
+    rows.push({
+      name: it.name,
+      tier: it.tier,
+      enchant: it.enchant ?? 0,
+      cityA: priceA,
+      cityB: priceB,
+      setupHtml,
+      profit,
+      notes,
+    });
+  }
+  mf.resultRows = rows;
+}
+
+function _buildFlipResultsFromRows(rows, cityA, cityB) {
+  const map = new Map();
+  for (const row of rows) {
+    const key = `${row.item_name}|${row.tier ?? ""}|${row.enchant ?? 0}`;
+    let slot = map.get(key);
+    if (!slot) {
+      slot = {
+        name: row.item_name,
+        tier: row.tier,
+        enchant: row.enchant ?? 0,
+        cityA: null,
+        cityB: null,
+      };
+      map.set(key, slot);
+    }
+    if (row.city === cityA && slot.cityA == null) {
+      slot.cityA = Number(row.observed_price ?? row.value ?? 0) || null;
+    } else if (row.city === cityB && slot.cityB == null) {
+      slot.cityB = Number(row.observed_price ?? row.value ?? 0) || null;
+    }
+  }
+  const out = [];
+  for (const slot of map.values()) {
+    const priceA = slot.cityA;
+    const priceB = slot.cityB;
+    let setupHtml = "--";
+    let profit = null;
+    if (priceA != null && priceB != null) {
+      if (priceA < priceB) {
+        setupHtml = `<span class="flip-city-a">City A</span> → <span class="flip-city-b">City B</span>`;
+        profit = priceB - priceA;
+      } else if (priceB < priceA) {
+        setupHtml = `<span class="flip-city-a">City B</span> → <span class="flip-city-b">City A</span>`;
+        profit = priceA - priceB;
+      } else {
+        setupHtml = "Same price";
+        profit = 0;
+      }
+    }
+    out.push({
+      name: slot.name,
+      tier: slot.tier,
+      enchant: slot.enchant,
+      cityA: priceA,
+      cityB: priceB,
+      setupHtml,
+      profit,
+      notes: "",
+    });
+  }
+  out.sort((a, b) => String(a.name).localeCompare(String(b.name)) || (a.tier ?? 0) - (b.tier ?? 0) || (a.enchant ?? 0) - (b.enchant ?? 0));
+  return out;
+}
+
+async function runMarketFlipCategoryInvoke(city) {
+  const mf = state.marketFlip;
+  const items = getFlipSelectedVariants(mf.baseItems).map((it) => ({
+    id: it.id,
+    name: it.name,
+    tier: it.tier,
+    enchant: it.enchant ?? 0,
+  }));
+  await window.botApi.setWindowProgress(0);
+  await window.botApi.minimizeWindow();
+  await sleep(350);
+  try {
+    await window.botApi.runCategoryScan(MARKET_FLIP_CATEGORY_ID, items, city);
+    logLine(`Flip scan leg started (${city}).`);
+  } catch (error) {
+    logLine(`Flip scan failed to start: ${error.message}`);
+    resetMarketFlipSession();
+    await window.botApi.setWindowProgress(-1);
+    await window.botApi.restoreWindow();
+  }
+}
+
+async function startMarketFlipScan() {
+  if (state.isCategoryFetchRunning) {
+    logLine("A scan is already running.");
+    return;
+  }
+  if (marketFlipBlocking()) {
+    logLine("Finish the Market Flip handoff or wait for the scan to finish.");
+    return;
+  }
+  const items = getFlipSelectedVariants(state.marketFlip.baseItems);
+  if (!items.length) {
+    logLine("Add at least one specific item first.");
+    return;
+  }
+  const cityA = byId("select-flip-city-a")?.value?.trim() || "";
+  const cityB = byId("select-flip-city-b")?.value?.trim() || "";
+  if (!cityA || !cityB) {
+    logLine("Select City A and City B.");
+    return;
+  }
+  if (cityA === cityB) {
+    logLine("City A and City B must be different.");
+    return;
+  }
+  await refreshCalibrationState();
+  if (!state.searchPoint || !state.region) {
+    logLine("Calibrate Search Point and Price Region on the Check tab first.");
+    return;
+  }
+  state.marketFlip = {
+    ...createInitialMarketFlip(),
+    active: true,
+    phase: "running_1",
+    cityA,
+    cityB,
+    baseItems: (state.marketFlip.baseItems || []).map((x) => ({
+      ...x,
+      variants: [...(x.variants || [])],
+      selectedVariantKeys: [...(x.selectedVariantKeys || [])],
+    })),
+    prices: new Map(),
+    resultRows: [],
+  };
+  setActiveView("market-flip");
+  renderMarketFlipChrome();
+  logLine(`Market flip phase 1 @ ${cityA} (${items.length} items). Open that market in-game.`);
+  await runMarketFlipCategoryInvoke(cityA);
+}
+
+async function continueMarketFlipPhase2() {
+  const mf = state.marketFlip;
+  if (!mf.active || mf.phase !== "handoff") return;
+  if (state.isCategoryFetchRunning) {
+    logLine("Scan already running.");
+    return;
+  }
+  const secondCity = mf.cityB;
+  mf.phase = "running_2";
+  setActiveView("market-flip");
+  renderMarketFlipChrome();
+  logLine(`Market flip phase 2 @ ${secondCity}. Open that market in-game.`);
+  await runMarketFlipCategoryInvoke(secondCity);
+}
+
+function fetchMarketFlipResultsFromLiveRows() {
+  const mf = state.marketFlip;
+  if (!mf.cityA || !mf.cityB) {
+    logLine("Set City A and City B first.");
+    return;
+  }
+  const selected = getFlipSelectedVariants(mf.baseItems);
+  if (!selected.length) {
+    logLine("No selected variants to compare.");
+    return;
+  }
+  const selectedCompositeKeys = new Set(
+    selected.map((it) => flipCanonicalCompositeKey(it.name, it.tier, it.enchant ?? 0)),
+  );
+  let sourceRows = (state.liveRows || []).filter((row) => {
+    if (row.category !== "market_flip") return false;
+    if (row.city !== mf.cityA && row.city !== mf.cityB) return false;
+    const rowComposite = row.flipCompositeKey || flipCanonicalCompositeKey(row.item_name, row.tier, row.enchant ?? 0);
+    return selectedCompositeKeys.has(rowComposite);
+  });
+  if (!sourceRows.length) {
+    const relaxed = [];
+    for (const row of state.liveRows || []) {
+      if (row.category !== "market_flip") continue;
+      if (row.city !== mf.cityA && row.city !== mf.cityB) continue;
+      const rowName = normalizeFlipMatchName(row.item_name);
+      const rowTier = row.tier != null ? Number(row.tier) : null;
+      const rowEnchant = Number(row.enchant ?? 0);
+      const candidates = selected.filter((it) => {
+        const selName = normalizeFlipMatchName(it.name);
+        const sameTier = (it.tier != null ? Number(it.tier) : null) === rowTier;
+        const sameEnchant = Number(it.enchant ?? 0) === rowEnchant;
+        const nameClose = selName === rowName || selName.includes(rowName) || rowName.includes(selName);
+        return sameTier && sameEnchant && nameClose;
+      });
+      if (candidates.length === 1) relaxed.push(row);
+    }
+    sourceRows = relaxed;
+  }
+  mf.resultRows = _buildFlipResultsFromRows(sourceRows, mf.cityA, mf.cityB);
+  mf.phase = mf.resultRows.length ? "done" : mf.phase;
+  renderMarketFlipChrome();
+  logLine(`Fetched ${mf.resultRows.length} comparison rows from Live Session Rows.`);
 }
 
 function msUntilNextUtcReadSlot(now = new Date()) {
@@ -116,9 +801,6 @@ function scheduleNextDbReadTick() {
   const waitMs = Math.max(1000, msUntilNextUtcReadSlot(new Date()));
   dbReadScheduleTimer = setTimeout(() => {
     loadPriceHistory().catch(() => {});
-    if (state.activeView === "market-price") {
-      loadMarketPriceRows().catch(() => {});
-    }
     scheduleNextDbReadTick();
   }, waitMs);
 }
@@ -152,10 +834,11 @@ function setActiveView(view) {
   document.querySelectorAll(".view-panel").forEach((panel) => {
     panel.classList.toggle("is-active", panel.dataset.view === view);
   });
-  if (view === "market-price") {
-    loadMarketPriceRows().catch((error) => {
-      logLine(`Market DB load failed: ${error.message}`);
-    });
+  if (view === "market-flip") {
+    renderFlipCitySelectors();
+    renderMarketFlipChrome();
+    renderMarketFlipItems();
+    renderFlipCatalogAccordion();
   }
 }
 
@@ -247,56 +930,25 @@ function renderCategoryProgress() {
   const progress = state.categoryProgress;
   const btn = byId("btn-start-category-fetch");
   const stopBtn = byId("btn-stop-category-fetch");
-  if (btn) btn.disabled = state.isCategoryFetchRunning;
+  const flipBlock = marketFlipBlocking();
+  const flipCheckBtn = byId("btn-flip-check-selected");
+  if (btn) btn.disabled = state.isCategoryFetchRunning || flipBlock;
   if (stopBtn) stopBtn.disabled = !state.isCategoryFetchRunning;
+  if (flipCheckBtn) {
+    const hasFlipItems = getFlipSelectedVariants().length > 0;
+    flipCheckBtn.disabled = !hasFlipItems || state.isCategoryFetchRunning || flipBlock;
+  }
   if (!node) return;
   if (!state.isCategoryFetchRunning && progress.total === 0) {
     node.textContent = "Scan: Idle";
     return;
   }
+  const flipLabel = progress.category === "Market Flip" ? "Market Flip · " : "";
   if (!state.isCategoryFetchRunning) {
-    node.textContent = `Scan: Done ${progress.done}/${progress.total}${progress.failures ? ` · Fail ${progress.failures}` : ""}${progress.city ? ` · ${progress.city}` : ""}`;
+    node.textContent = `${flipLabel}Done ${progress.done}/${progress.total}${progress.failures ? ` · Fail ${progress.failures}` : ""}${progress.city ? ` · ${progress.city}` : ""}`;
     return;
   }
-  node.textContent = `Scan: Running ${progress.done}/${progress.total}${progress.failures ? ` · Fail ${progress.failures}` : ""}${progress.city ? ` · ${progress.city}` : ""}`;
-}
-
-function saveMarketReviewState() {
-  try {
-    const payload = {
-      rows: state.marketPriceRows,
-      marketRowCounter: state.marketRowCounter,
-      selectedCity: state.selectedCity || "",
-      savedAt: new Date().toISOString(),
-    };
-    localStorage.setItem(MARKET_REVIEW_STATE_KEY, JSON.stringify(payload));
-  } catch (_error) {
-    // ignore localStorage write failures
-  }
-}
-
-function restoreMarketReviewState() {
-  try {
-    const raw = localStorage.getItem(MARKET_REVIEW_STATE_KEY);
-    if (!raw) return;
-    const payload = JSON.parse(raw);
-    const rows = Array.isArray(payload?.rows) ? payload.rows : [];
-    state.marketPriceRows = rows
-      .filter((row) => row && typeof row === "object" && row.id)
-      .map((row) => ({
-        ...row,
-        status: String(row.status || "pending"),
-        statusLabel: String(row.statusLabel || "Pending"),
-      }));
-    state.marketRowCounter = Number.isFinite(Number(payload?.marketRowCounter))
-      ? Math.max(0, Number(payload.marketRowCounter))
-      : state.marketPriceRows.length;
-    if (!state.selectedCity && payload?.selectedCity) {
-      state.selectedCity = String(payload.selectedCity);
-    }
-  } catch (_error) {
-    // ignore corrupted persisted review state
-  }
+  node.textContent = `${flipLabel}Running ${progress.done}/${progress.total}${progress.failures ? ` · Fail ${progress.failures}` : ""}${progress.city ? ` · ${progress.city}` : ""}`;
 }
 
 function renderResumeCheckpointState() {
@@ -441,9 +1093,12 @@ function renderLiveRows() {
       const tr = document.createElement("tr");
       tr.innerHTML = `
       <td>${formatRowTime(row.timestamp)}</td>
+      <td>${row.item_name || row.queryText || "-"}</td>
+      <td>${row.tier ?? "-"}</td>
+      <td>${row.enchant ?? 0}</td>
       <td>${row.city || "-"}</td>
       <td>${row.category || "-"}</td>
-      <td>${row.item_name || row.queryText || "-"}</td>
+      <td>${row.type || "-"}</td>
       <td>${normalizeDisplayPrice(row.observed_price ?? row.value)}</td>
     `;
       body.appendChild(tr);
@@ -492,195 +1147,6 @@ function renderHistoryRows() {
   renderDashboardStats();
 }
 
-function marketRowStatusClass(row) {
-  if (row.status === "posted") return "posted";
-  if (row.status === "failed") return "failed";
-  if (!Number.isFinite(Number(row.finalPrice)) || Number(row.finalPrice) < 0) return "invalid";
-  return "pending";
-}
-
-function renderMarketPriceSummary() {
-  const node = byId("market-review-summary");
-  if (!node) return;
-  const total = state.marketPriceRows.length;
-  const posted = state.marketPriceRows.filter((row) => row.status === "posted").length;
-  const failed = state.marketPriceRows.filter((row) => row.status === "failed").length;
-  const invalid = state.marketPriceRows.filter((row) => marketRowStatusClass(row) === "invalid").length;
-  const pending = state.marketPriceRows.filter((row) => marketRowStatusClass(row) === "pending").length;
-  if (total === 0) {
-    node.textContent = "No rows yet.";
-    return;
-  }
-  node.textContent = `Rows: ${total} · Pending: ${pending} · Posted: ${posted} · Failed: ${failed} · Invalid: ${invalid}`;
-}
-
-function clearAutoPostIdleTimer() {
-  if (autoPostIdleTimer) {
-    clearTimeout(autoPostIdleTimer);
-    autoPostIdleTimer = null;
-  }
-}
-
-function collectRowsForPost({ auto = false } = {}) {
-  const rowsToPost = [];
-  const blocked = [];
-  for (const row of state.marketPriceRows) {
-    if (row.status === "posted") continue;
-    if (auto && row.status !== "pending") continue;
-    const numericPrice = Number(row.finalPrice);
-    if (!row.item_id) {
-      blocked.push({ rowId: row.id, reason: "Missing item id" });
-      continue;
-    }
-    if (!row.city) {
-      blocked.push({ rowId: row.id, reason: "Missing city" });
-      continue;
-    }
-    if (!Number.isFinite(numericPrice) || numericPrice < 0) {
-      blocked.push({ rowId: row.id, reason: "Invalid price" });
-      continue;
-    }
-    // Auto-post skips OCR miss/zero rows by request.
-    if (auto && numericPrice === 0) {
-      continue;
-    }
-    rowsToPost.push(row);
-  }
-  return { rowsToPost, blocked };
-}
-
-async function postMarketRows({ auto = false } = {}) {
-  clearAutoPostIdleTimer();
-  if (state.isPostingMarketRows) return { posted: 0, failed: 0, skipped: true };
-
-  const { rowsToPost, blocked } = collectRowsForPost({ auto });
-  if (!auto && blocked.length) {
-    const blockedById = new Map(blocked.map((x) => [x.rowId, x.reason]));
-    state.marketPriceRows = state.marketPriceRows.map((row) => {
-      const reason = blockedById.get(row.id);
-      if (!reason || row.status === "posted") return row;
-      return { ...row, status: "failed", statusLabel: `Failed: ${reason}` };
-    });
-    renderMarketPriceRows();
-  }
-  if (rowsToPost.length === 0) {
-    if (!auto) logLine("No postable rows. Check Post Status reasons.");
-    return { posted: 0, failed: 0, skipped: false };
-  }
-
-  logLine(`${auto ? "Auto-posting" : "Posting"} ${rowsToPost.length} reviewed rows to Supabase...`);
-  const payload = rowsToPost.map((row) => ({
-    rowId: row.id,
-    itemUniqueName: row.item_id,
-    itemName: row.item_name || row.item_id,
-    tier: row.tier,
-    enchant: row.enchant || 0,
-    city: row.city,
-    price: Number(row.finalPrice),
-    postedAt: row.timestamp,
-  }));
-
-  state.isPostingMarketRows = true;
-  try {
-    const response = await request("postReviewedPrices", { rows: payload });
-    const byIdMap = new Map((response.results || []).map((result) => [result.rowId, result]));
-    state.marketPriceRows = state.marketPriceRows.map((row) => {
-      const result = byIdMap.get(row.id);
-      if (!result) return row;
-      if (result.ok) {
-        return { ...row, status: "posted", statusLabel: "Posted" };
-      }
-      return { ...row, status: "failed", statusLabel: `Failed: ${result.error || "unknown"}` };
-    });
-    renderMarketPriceRows();
-    logLine(`Supabase post complete. OK=${response.posted || 0}, Failed=${response.failed || 0}`);
-    return { posted: response.posted || 0, failed: response.failed || 0, skipped: false };
-  } catch (error) {
-    logLine(`Supabase post failed: ${error.message}`);
-    return { posted: 0, failed: rowsToPost.length, skipped: false };
-  } finally {
-    state.isPostingMarketRows = false;
-  }
-}
-
-function scheduleAutoPostIdleFlush() {
-  clearAutoPostIdleTimer();
-  autoPostIdleTimer = setTimeout(() => {
-    postMarketRows({ auto: true }).catch((error) => {
-      logLine(`Auto-post idle flush failed: ${error.message}`);
-    });
-  }, AUTO_POST_IDLE_MS);
-}
-
-function renderMarketPriceRows() {
-  const body = byId("market-price-body");
-  if (!body) {
-    saveMarketReviewState();
-    return;
-  }
-  body.innerHTML = "";
-  for (const row of state.marketPriceRows) {
-    const statusClass = marketRowStatusClass(row);
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td>${row.category || "-"}</td>
-      <td>${row.item_name || row.queryText || "-"}</td>
-      <td>${row.tier ?? "-"}</td>
-      <td>${row.enchant ?? 0}</td>
-      <td>
-        <input
-          class="price-input"
-          type="number"
-          min="0"
-          step="1"
-          value="${row.finalPrice ?? ""}"
-          data-action="edit-final"
-          data-row-id="${row.id}"
-        />
-      </td>
-      <td>${row.city || "-"}</td>
-      <td><span class="status-badge ${statusClass}">${row.statusLabel || row.status || "pending"}</span></td>
-      <td>${formatRowTime(row.timestamp)}</td>
-    `;
-    body.appendChild(tr);
-  }
-  renderMarketPriceSummary();
-  saveMarketReviewState();
-}
-
-function appendMarketReviewRowFromScan(payload, scan) {
-  const rawScanValue = Number(scan.value);
-  // OCR noise can produce tiny false positives (e.g. 1). Treat them as undetected.
-  const normalizedPrice = Number.isFinite(rawScanValue) && rawScanValue > 1 ? Math.round(rawScanValue) : 0;
-  const displayItemName = String(payload.item?.name || "").trim() || String(scan.queryText || "").replace(/\s+\d+\.\d+\s*$/, "");
-  const row = {
-    id: `mpr-${Date.now()}-${++state.marketRowCounter}`,
-    timestamp: scan.timestamp,
-    city: payload.city || "",
-    category: payload.categoryId || "",
-    item_name: displayItemName,
-    item_id: payload.item?.id || "",
-    tier: payload.item?.tier ?? null,
-    enchant: payload.item?.enchant ?? 0,
-    ocrPrice: normalizedPrice,
-    finalPrice: normalizedPrice,
-    error: scan.error || "",
-    status: "pending",
-    statusLabel: normalizedPrice > 0 ? "Pending" : "No OCR (0)",
-  };
-  state.marketPriceRows.unshift(row);
-  renderMarketPriceRows();
-  const postableNow = collectRowsForPost({ auto: true }).rowsToPost.length;
-  if (postableNow >= AUTO_POST_BATCH_SIZE) {
-    clearAutoPostIdleTimer();
-    postMarketRows({ auto: true }).catch((error) => {
-      logLine(`Auto-post batch failed: ${error.message}`);
-    });
-  } else {
-    scheduleAutoPostIdleFlush();
-  }
-}
-
 async function refreshWatchlist() {
   state.watchlist = await request("listWatchItems");
   renderWatchlist();
@@ -714,6 +1180,8 @@ async function loadItemCatalog(force = false) {
     }
     renderCategorySelector();
     renderCatalogAccordion();
+    renderFlipCitySelectors();
+    renderFlipCatalogAccordion();
     logLine(`Item catalog ready (${data.itemCount} rows, ${src})`);
   } catch (error) {
     if (statusEl) {
@@ -824,6 +1292,10 @@ function collectItemsForCategory(categoryId) {
   };
   return allItems
     .filter((item) => (item.exactCategoryId || inferCategoryFromId(item.id)) === categoryId)
+    .filter((item) => {
+      if (categoryId !== "vanity") return true;
+      return !/^\s*\d/.test(String(item.name || ""));
+    })
     .map((item) => ({ id: item.id, name: item.name, tier: item.tier, enchant: item.enchant }));
 }
 
@@ -837,83 +1309,12 @@ async function loadPriceHistory() {
   }
 }
 
-function renderMarketDbSummary() {
-  const node = byId("market-db-summary");
-  if (!node) return;
-  const total = state.marketDbRows.length;
-  if (total === 0) {
-    node.textContent = "No rows found for current filters.";
-    return;
-  }
-  node.textContent = `Rows: ${total} · Source: bot database`;
-}
-
-function repopulateFilterSelect(id, values, allLabel, selectedValue = "") {
-  const sel = byId(id);
-  if (!sel) return;
-  const prev = selectedValue || sel.value || "";
-  sel.innerHTML = "";
-  const base = document.createElement("option");
-  base.value = "";
-  base.textContent = allLabel;
-  sel.appendChild(base);
-  for (const value of values) {
-    const opt = document.createElement("option");
-    opt.value = String(value);
-    opt.textContent = String(value);
-    sel.appendChild(opt);
-  }
-  sel.value = [...sel.options].some((o) => o.value === prev) ? prev : "";
-}
-
-function renderMarketDbRows() {
-  const body = byId("market-db-body");
-  if (!body) return;
-  body.innerHTML = "";
-  for (const row of state.marketDbRows) {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td>${row.item || "-"}</td>
-      <td>${row.tier ?? "-"}</td>
-      <td>${row.enchant ?? 0}</td>
-      <td>${row.city || "-"}</td>
-      <td>${row.category || "-"}</td>
-      <td>${row.type || "-"}</td>
-      <td>${row.quality || "-"}</td>
-      <td class="price-cell">${normalizeDisplayPrice(row.price)}</td>
-      <td>${formatRowTime(row.last_updated)}</td>
-    `;
-    body.appendChild(tr);
-  }
-  renderMarketDbSummary();
-}
-
-async function loadMarketPriceRows() {
-  const payload = {
-    search: state.marketDbFilters.search || "",
-    category: state.marketDbFilters.category || "",
-    type: state.marketDbFilters.type || "",
-    tier: state.marketDbFilters.tier || "",
-    enchant: state.marketDbFilters.enchant || "",
-    city: state.marketDbFilters.city || "",
-    sort: state.marketDbFilters.sort || "last_updated_desc",
-    limit: MARKET_DB_FETCH_LIMIT,
-    offset: 0,
-    botOnly: true,
-  };
-  const res = await request("getMarketPriceRows", payload);
-  state.marketDbRows = Array.isArray(res?.rows) ? res.rows : [];
-  const f = res?.filters || {};
-  repopulateFilterSelect("market-filter-category", f.categories || [], "All Categories", state.marketDbFilters.category);
-  repopulateFilterSelect("market-filter-type", f.types || [], "All Types", state.marketDbFilters.type);
-  repopulateFilterSelect("market-filter-tier", f.tiers || [], "All Tiers", state.marketDbFilters.tier);
-  repopulateFilterSelect("market-filter-enchant", f.enchants || [], "All Enchants", state.marketDbFilters.enchant);
-  repopulateFilterSelect("market-filter-city", f.cities || [], "All Regions", state.marketDbFilters.city);
-  renderMarketDbRows();
-}
-
 function openStartFetchFlow() {
   if (state.isCategoryFetchRunning) return;
+  if (marketFlipBlocking()) {
+    logLine("Finish Market Flip (Continue phase 2 or stop) before starting a category fetch.");
+    return;
+  }
   if (state.selectedCity) {
     startCategoryFetchWithCity(state.selectedCity).catch((error) => {
       logLine(`Category fetch failed: ${error.message}`);
@@ -925,6 +1326,10 @@ function openStartFetchFlow() {
 
 async function startCategoryFetchWithCity(city) {
   if (state.isCategoryFetchRunning) return;
+  if (marketFlipBlocking()) {
+    logLine("Finish Market Flip before starting a category fetch.");
+    return;
+  }
   const marketCity = String(city || "").trim();
   if (!marketCity) {
     logLine("Choose a city before starting.");
@@ -972,6 +1377,60 @@ async function startCategoryFetchWithCity(city) {
     logLine("Category fetch started.");
   } catch (error) {
     logLine(`Category fetch failed: ${error.message}`);
+    state.isCategoryFetchRunning = false;
+    renderCategoryProgress();
+    await window.botApi.setWindowProgress(-1);
+    await window.botApi.restoreWindow();
+  }
+}
+
+async function startManualCheckScanWithItems(city, items, categoryLabel = "Market Flip Selected") {
+  if (state.isCategoryFetchRunning) {
+    logLine("A scan is already running.");
+    return;
+  }
+  if (marketFlipBlocking()) {
+    logLine("Finish Market Flip phase first or stop it, then run Check.");
+    return;
+  }
+  const marketCity = String(city || "").trim();
+  if (!marketCity) {
+    logLine("Select a city first.");
+    return;
+  }
+  const safeItems = Array.isArray(items) ? items.filter((it) => it && it.name) : [];
+  if (!safeItems.length) {
+    logLine("No selected items to check.");
+    return;
+  }
+  await refreshCalibrationState();
+  if (!state.searchPoint || !state.region) {
+    logLine("Cannot start fetch: calibrate Search Point and Price Region first.");
+    return;
+  }
+  setSelectedCity(marketCity);
+  state.isCategoryFetchRunning = true;
+  state.categoryProgress = {
+    done: 0,
+    total: safeItems.length,
+    failures: 0,
+    item: "",
+    category: categoryLabel,
+    city: marketCity,
+  };
+  renderCategoryProgress();
+  setActiveView("check");
+  await window.botApi.setWindowProgress(0);
+  await window.botApi.minimizeWindow();
+  await sleep(350);
+  logLine(`Starting check: ${categoryLabel} @ ${marketCity} (${safeItems.length} items)`);
+  try {
+    logLine("Electron minimized. Keep Albion market window focused.");
+    await window.botApi.runCategoryScan(MARKET_FLIP_CATEGORY_ID, safeItems, marketCity);
+    await refreshResumeCheckpointState();
+    logLine("Check scan started.");
+  } catch (error) {
+    logLine(`Check scan failed: ${error.message}`);
     state.isCategoryFetchRunning = false;
     renderCategoryProgress();
     await window.botApi.setWindowProgress(-1);
@@ -1035,6 +1494,18 @@ function wireActions() {
     renderCatalogAccordion();
   });
 
+  const flipCatalogFilterInput = byId("input-flip-catalog-filter");
+  flipCatalogFilterInput?.addEventListener("input", (event) => {
+    state.flipCatalogFilter = event.target.value;
+    clearTimeout(flipCatalogFilterDebounce);
+    flipCatalogFilterDebounce = setTimeout(() => renderFlipCatalogAccordion(), 120);
+  });
+  byId("btn-flip-catalog-clear")?.addEventListener("click", () => {
+    state.flipCatalogFilter = "";
+    if (flipCatalogFilterInput) flipCatalogFilterInput.value = "";
+    renderFlipCatalogAccordion();
+  });
+
   byId("btn-catalog-refresh")?.addEventListener("click", async () => {
     await loadItemCatalog(true);
   });
@@ -1090,6 +1561,10 @@ function wireActions() {
   });
   byId("btn-resume-last-scan")?.addEventListener("click", async () => {
     if (state.isCategoryFetchRunning) return;
+    if (marketFlipBlocking()) {
+      logLine("Finish Market Flip before resuming a checkpoint scan.");
+      return;
+    }
     try {
       const response = await request("resumeCategoryScanFromCheckpoint");
       if (response?.running) {
@@ -1144,52 +1619,6 @@ function wireActions() {
     renderLiveRows();
   });
 
-  byId("market-filter-search")?.addEventListener("input", (event) => {
-    const target = event.target;
-    if (!(target instanceof HTMLInputElement)) return;
-    state.marketDbFilters.search = target.value || "";
-    clearTimeout(marketFilterDebounce);
-    marketFilterDebounce = setTimeout(() => {
-      loadMarketPriceRows().catch((error) => logLine(`Market DB load failed: ${error.message}`));
-    }, MARKET_FILTER_DEBOUNCE_MS);
-  });
-  byId("market-filter-category")?.addEventListener("change", (event) => {
-    const target = event.target;
-    if (!(target instanceof HTMLSelectElement)) return;
-    state.marketDbFilters.category = target.value || "";
-    loadMarketPriceRows().catch((error) => logLine(`Market DB load failed: ${error.message}`));
-  });
-  byId("market-filter-type")?.addEventListener("change", (event) => {
-    const target = event.target;
-    if (!(target instanceof HTMLSelectElement)) return;
-    state.marketDbFilters.type = target.value || "";
-    loadMarketPriceRows().catch((error) => logLine(`Market DB load failed: ${error.message}`));
-  });
-  byId("market-filter-tier")?.addEventListener("change", (event) => {
-    const target = event.target;
-    if (!(target instanceof HTMLSelectElement)) return;
-    state.marketDbFilters.tier = target.value || "";
-    loadMarketPriceRows().catch((error) => logLine(`Market DB load failed: ${error.message}`));
-  });
-  byId("market-filter-enchant")?.addEventListener("change", (event) => {
-    const target = event.target;
-    if (!(target instanceof HTMLSelectElement)) return;
-    state.marketDbFilters.enchant = target.value || "";
-    loadMarketPriceRows().catch((error) => logLine(`Market DB load failed: ${error.message}`));
-  });
-  byId("market-filter-city")?.addEventListener("change", (event) => {
-    const target = event.target;
-    if (!(target instanceof HTMLSelectElement)) return;
-    state.marketDbFilters.city = target.value || "";
-    loadMarketPriceRows().catch((error) => logLine(`Market DB load failed: ${error.message}`));
-  });
-  byId("market-filter-sort")?.addEventListener("change", (event) => {
-    const target = event.target;
-    if (!(target instanceof HTMLSelectElement)) return;
-    state.marketDbFilters.sort = target.value || "last_updated_desc";
-    loadMarketPriceRows().catch((error) => logLine(`Market DB load failed: ${error.message}`));
-  });
-
   byId("btn-help")?.addEventListener("click", () => {
     const hidden = byId("help-modal").classList.contains("is-hidden");
     setHelpVisible(hidden);
@@ -1203,6 +1632,64 @@ function wireActions() {
 
   byId("btn-save-settings")?.addEventListener("click", saveUiPrefs);
   byId("btn-reset-settings")?.addEventListener("click", resetUiPrefs);
+
+  renderFlipCitySelectors();
+  byId("btn-flip-items-clear")?.addEventListener("click", () => {
+    state.marketFlip.baseItems = [];
+    renderMarketFlipItems();
+  });
+  byId("btn-flip-check-selected")?.addEventListener("click", () => {
+    const city = byId("select-flip-city-a")?.value?.trim() || "";
+    const items = getFlipSelectedVariants().map((it) => ({
+      id: it.id,
+      name: it.name,
+      tier: it.tier,
+      enchant: it.enchant ?? 0,
+    }));
+    startManualCheckScanWithItems(city, items, `Manual Check (${city || "-"})`).catch((error) =>
+      logLine(`Manual check failed: ${error.message}`),
+    );
+  });
+  byId("flip-items-body")?.addEventListener("click", (ev) => {
+    const t = ev.target;
+    if (!(t instanceof HTMLElement)) return;
+    if (t.dataset.flipBulkBase) {
+      openFlipBulkEditor(t.dataset.flipBulkBase);
+      return;
+    }
+    if (t.dataset.flipRemoveBase) {
+      state.marketFlip.baseItems = state.marketFlip.baseItems.filter((it) => it.baseKey !== t.dataset.flipRemoveBase);
+      renderMarketFlipItems();
+    }
+  });
+  byId("flip-bulk-body")?.addEventListener("click", (ev) => {
+    const t = ev.target;
+    if (!(t instanceof HTMLElement)) return;
+    const key = t.dataset.flipBulkToggle;
+    if (!key || !flipBulkEditorDraft) return;
+    if (flipBulkEditorDraft.selectedKeys.has(key)) {
+      flipBulkEditorDraft.selectedKeys.delete(key);
+    } else if (flipBulkEditorDraft.availableKeys.has(key)) {
+      flipBulkEditorDraft.selectedKeys.add(key);
+    }
+    renderFlipBulkEditor();
+  });
+  byId("btn-flip-bulk-save")?.addEventListener("click", () => applyFlipBulkEditor());
+  byId("btn-flip-bulk-close")?.addEventListener("click", () => closeFlipBulkEditor());
+  byId("flip-bulk-modal")?.addEventListener("click", (event) => {
+    if (event.target?.id === "flip-bulk-modal") {
+      closeFlipBulkEditor();
+    }
+  });
+  byId("btn-flip-start")?.addEventListener("click", () => {
+    startMarketFlipScan().catch((error) => logLine(`Flip start: ${error.message}`));
+  });
+  byId("btn-flip-continue-phase2")?.addEventListener("click", () => {
+    continueMarketFlipPhase2().catch((error) => logLine(`Flip phase 2: ${error.message}`));
+  });
+  byId("btn-flip-export-live")?.addEventListener("click", () => {
+    fetchMarketFlipResultsFromLiveRows();
+  });
 
   document.addEventListener("keydown", (event) => {
     const key = event.key.toLowerCase();
@@ -1267,7 +1754,10 @@ function wireEvents() {
     if (message.event === "categoryScanStarted") {
       const payload = message.payload || {};
       const catId = payload.categoryId || "";
-      const catLabel = EXACT_CATEGORY_ORDER.find((c) => c.id === catId)?.label || catId;
+      const catLabel =
+        catId === MARKET_FLIP_CATEGORY_ID
+          ? "Market Flip"
+          : EXACT_CATEGORY_ORDER.find((c) => c.id === catId)?.label || catId;
       state.isCategoryFetchRunning = true;
       state.categoryProgress = {
         done: 0,
@@ -1287,12 +1777,17 @@ function wireEvents() {
       const rawScanValue = Number(scan.value);
       const normalizedScanValue =
         Number.isFinite(rawScanValue) && rawScanValue > 1 ? Math.round(rawScanValue) : 0;
+      recordMarketFlipPrice(payload, normalizedScanValue, scan);
       const displayItemName = String(payload.item?.name || "").trim() || String(scan.queryText || "").replace(/\s+\d+\.\d+\s*$/, "");
       state.liveRows.unshift({
         timestamp: scan.timestamp,
         city: payload.city || "",
         category: payload.categoryId,
         item_name: displayItemName,
+        flipCompositeKey: flipCanonicalCompositeKey(displayItemName, payload.item?.tier ?? null, payload.item?.enchant ?? 0),
+        tier: payload.item?.tier ?? null,
+        enchant: payload.item?.enchant ?? 0,
+        type: inferTypeFromItemName(displayItemName),
         observed_price: normalizedScanValue,
         confidence: scan.confidence,
         error: scan.error || "",
@@ -1306,7 +1801,6 @@ function wireEvents() {
         city: payload.city || state.categoryProgress.city,
       };
       renderLiveRows();
-      appendMarketReviewRowFromScan(payload, scan);
       renderCategoryProgress();
       const total = Number(payload.totalItems || 0);
       const done = Number(payload.index || 0);
@@ -1325,16 +1819,44 @@ function wireEvents() {
         failures: payload.failures || state.categoryProgress.failures,
         city: payload.city || state.categoryProgress.city,
       };
-      renderCategoryProgress();
       window.botApi.setWindowProgress(-1).catch(() => {});
       window.botApi.restoreWindow().catch(() => {});
       window.botApi.closeStatusWindow().catch(() => {});
+
+      const mf = state.marketFlip;
+      const flipFinished = payload.categoryId === MARKET_FLIP_CATEGORY_ID;
+      if (flipFinished && mf.active) {
+        if (payload.cancelled) {
+          resetMarketFlipSession();
+          logLine("Market flip stopped.");
+        } else if (mf.phase === "running_1") {
+          mf.phase = "handoff";
+          setActiveView("market-flip");
+          renderMarketFlipChrome();
+          logLine(`Market flip phase 1 done. Open ${mf.cityB} market now, then click Continue to phase 2.`);
+        } else if (mf.phase === "running_2") {
+          finalizeMarketFlipResults();
+          mf.active = false;
+          mf.phase = "done";
+          setActiveView("market-flip");
+          renderMarketFlipChrome();
+          logLine("Market flip complete. See comparison table.");
+        }
+      }
+      renderCategoryProgress();
+
       loadPriceHistory().catch(() => {});
-      loadMarketPriceRows().catch(() => {});
       refreshResumeCheckpointState().catch(() => {});
       logLine(
         `Category fetch ${payload.cancelled ? "stopped" : "done"}: processed=${payload.processed ?? 0}, failures=${payload.failures ?? 0}`,
       );
+      return;
+    }
+    if (message.event === "maintenanceDetected") {
+      if (state.marketFlip.active) {
+        resetMarketFlipSession();
+        logLine("Market flip reset (maintenance).");
+      }
       return;
     }
     if (message.event === "log") {
@@ -1363,15 +1885,14 @@ async function bootstrap() {
   loadUiPrefs();
   renderCategorySelector();
   renderFetchCityOptions();
-  restoreMarketReviewState();
-  const marketSearchInput = byId("market-filter-search");
-  if (marketSearchInput) marketSearchInput.value = state.marketDbFilters.search;
-  const marketSortSelect = byId("market-filter-sort");
-  if (marketSortSelect) marketSortSelect.value = state.marketDbFilters.sort || "last_updated_desc";
   setSelectedCity(localStorage.getItem(FETCH_CITY_STORAGE_KEY) || MARKET_CITIES[0]);
   renderCityChips();
   renderCalibrationStatus();
   renderCategoryProgress();
+  renderFlipCitySelectors();
+  renderMarketFlipItems();
+  renderFlipCatalogAccordion();
+  renderMarketFlipChrome();
   await loadItemCatalog(false);
   await refreshWatchlist();
   await refreshCalibrationState();
@@ -1379,12 +1900,6 @@ async function bootstrap() {
   await refreshResumeCheckpointState();
   scheduleNextDbReadTick();
   renderLiveRows();
-  renderMarketDbRows();
-  renderMarketPriceRows();
-  const restoredPostable = collectRowsForPost({ auto: true }).rowsToPost.length;
-  if (restoredPostable > 0) {
-    scheduleAutoPostIdleFlush();
-  }
   setActiveView("dashboard");
   logLine("Items console ready");
 }

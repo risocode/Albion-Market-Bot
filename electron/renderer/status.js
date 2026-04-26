@@ -1,5 +1,4 @@
 const EXACT_CATEGORY_ORDER = [
-  { id: "all", label: "All Items" },
   { id: "weapons", label: "Weapons" },
   { id: "chest_armor", label: "Chest Armor" },
   { id: "head_armor", label: "Head Armor" },
@@ -15,6 +14,7 @@ const EXACT_CATEGORY_ORDER = [
   { id: "farming", label: "Farming" },
   { id: "furniture", label: "Furniture" },
   { id: "vanity", label: "Vanity" },
+  { id: "all", label: "All Items" },
 ];
 
 function $(id) {
@@ -58,11 +58,15 @@ function setProgress(done, total) {
 
 let pausedLocal = false;
 let etaTimer = null;
+const ESTIMATED_ITEM_SECONDS = 2.0;
+const ESTIMATED_BREAK_EVERY_SECONDS = 60.0;
+const ESTIMATED_BREAK_DURATION_SECONDS = 5.0;
 let scanMeta = {
   startedAtMs: 0,
   done: 0,
   total: 0,
   finished: false,
+  estimatedFinishAtMs: 0,
 };
 
 function clearEtaTimer() {
@@ -89,15 +93,12 @@ function renderEta() {
     node.textContent = "ETA: --";
     return;
   }
-  if (scanMeta.done <= 0 || scanMeta.startedAtMs <= 0) {
+  if (scanMeta.estimatedFinishAtMs <= 0) {
     node.textContent = "ETA: calculating...";
     return;
   }
-  const elapsedSec = Math.max(1, (Date.now() - scanMeta.startedAtMs) / 1000);
-  const avgSecPerItem = elapsedSec / Math.max(1, scanMeta.done);
-  const remainingItems = Math.max(0, scanMeta.total - scanMeta.done);
-  const remainingSec = Math.max(0, Math.round(remainingItems * avgSecPerItem));
-  const finishAt = new Date(Date.now() + remainingSec * 1000);
+  const remainingSec = Math.max(0, Math.round((scanMeta.estimatedFinishAtMs - Date.now()) / 1000));
+  const finishAt = new Date(scanMeta.estimatedFinishAtMs);
   const finishPh = finishAt.toLocaleString("en-PH", {
     timeZone: "Asia/Manila",
     year: "numeric",
@@ -141,7 +142,14 @@ function applyBotMessage(msg) {
       done: 0,
       total: Number(payload.totalItems || 0),
       finished: false,
+      estimatedFinishAtMs: 0,
     };
+    const totalItems = Math.max(0, scanMeta.total);
+    const itemSeconds = totalItems * ESTIMATED_ITEM_SECONDS;
+    const breakCount = Math.floor(itemSeconds / ESTIMATED_BREAK_EVERY_SECONDS);
+    const breakSeconds = breakCount * ESTIMATED_BREAK_DURATION_SECONDS;
+    const estimatedTotalSeconds = Math.max(0, Math.round(itemSeconds + breakSeconds));
+    scanMeta.estimatedFinishAtMs = Date.now() + estimatedTotalSeconds * 1000;
     renderEta();
     clearEtaTimer();
     etaTimer = setInterval(renderEta, 1000);

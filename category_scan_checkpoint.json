@@ -1,167 +1,17 @@
 {
-  "scanId": "2026-04-25T15:42:49.640485+00:00",
-  "categoryId": "bags",
-  "city": "Caerleon",
-  "startedAt": "2026-04-25T15:42:49.640485+00:00",
-  "updatedAt": "2026-04-25T15:44:31.727822+00:00",
-  "finishedAt": "",
-  "totalItems": 50,
-  "nextIndex": 29,
-  "processed": 29,
+  "scanId": "2026-04-25T21:05:20.626173+00:00",
+  "categoryId": "market_flip",
+  "city": "Bridgewatch",
+  "startedAt": "2026-04-25T21:05:20.626173+00:00",
+  "updatedAt": "2026-04-25T21:05:46.137254+00:00",
+  "finishedAt": "2026-04-25T21:05:46.137254+00:00",
+  "totalItems": 25,
+  "nextIndex": 8,
+  "processed": 8,
   "failures": 0,
-  "cancelled": false,
+  "cancelled": true,
   "completed": false,
   "items": [
-    {
-      "name": "Adept's Bag",
-      "id": "T4_BAG",
-      "tier": 4,
-      "enchant": 0
-    },
-    {
-      "name": "Adept's Bag",
-      "id": "T4_BAG@1",
-      "tier": 4,
-      "enchant": 1
-    },
-    {
-      "name": "Adept's Bag",
-      "id": "T4_BAG@2",
-      "tier": 4,
-      "enchant": 2
-    },
-    {
-      "name": "Adept's Bag",
-      "id": "T4_BAG@3",
-      "tier": 4,
-      "enchant": 3
-    },
-    {
-      "name": "Adept's Bag",
-      "id": "T4_BAG@4",
-      "tier": 4,
-      "enchant": 4
-    },
-    {
-      "name": "Expert's Bag",
-      "id": "T5_BAG",
-      "tier": 5,
-      "enchant": 0
-    },
-    {
-      "name": "Expert's Bag",
-      "id": "T5_BAG@1",
-      "tier": 5,
-      "enchant": 1
-    },
-    {
-      "name": "Expert's Bag",
-      "id": "T5_BAG@2",
-      "tier": 5,
-      "enchant": 2
-    },
-    {
-      "name": "Expert's Bag",
-      "id": "T5_BAG@3",
-      "tier": 5,
-      "enchant": 3
-    },
-    {
-      "name": "Expert's Bag",
-      "id": "T5_BAG@4",
-      "tier": 5,
-      "enchant": 4
-    },
-    {
-      "name": "Master's Bag",
-      "id": "T6_BAG",
-      "tier": 6,
-      "enchant": 0
-    },
-    {
-      "name": "Master's Bag",
-      "id": "T6_BAG@1",
-      "tier": 6,
-      "enchant": 1
-    },
-    {
-      "name": "Master's Bag",
-      "id": "T6_BAG@2",
-      "tier": 6,
-      "enchant": 2
-    },
-    {
-      "name": "Master's Bag",
-      "id": "T6_BAG@3",
-      "tier": 6,
-      "enchant": 3
-    },
-    {
-      "name": "Master's Bag",
-      "id": "T6_BAG@4",
-      "tier": 6,
-      "enchant": 4
-    },
-    {
-      "name": "Grandmaster's Bag",
-      "id": "T7_BAG",
-      "tier": 7,
-      "enchant": 0
-    },
-    {
-      "name": "Grandmaster's Bag",
-      "id": "T7_BAG@1",
-      "tier": 7,
-      "enchant": 1
-    },
-    {
-      "name": "Grandmaster's Bag",
-      "id": "T7_BAG@2",
-      "tier": 7,
-      "enchant": 2
-    },
-    {
-      "name": "Grandmaster's Bag",
-      "id": "T7_BAG@3",
-      "tier": 7,
-      "enchant": 3
-    },
-    {
-      "name": "Grandmaster's Bag",
-      "id": "T7_BAG@4",
-      "tier": 7,
-      "enchant": 4
-    },
-    {
-      "name": "Elder's Bag",
-      "id": "T8_BAG",
-      "tier": 8,
-      "enchant": 0
-    },
-    {
-      "name": "Elder's Bag",
-      "id": "T8_BAG@1",
-      "tier": 8,
-      "enchant": 1
-    },
-    {
-      "name": "Elder's Bag",
-      "id": "T8_BAG@2",
-      "tier": 8,
-      "enchant": 2
-    },
-    {
-      "name": "Elder's Bag",
-      "id": "T8_BAG@3",
-      "tier": 8,
-      "enchant": 3
-    },
-    {
-      "name": "Elder's Bag",
-      "id": "T8_BAG@4",
-      "tier": 8,
-      "enchant": 4
-    },
     {
       "name": "Adept's Satchel of Insight",
       "id": "T4_BAG_INSIGHT",
